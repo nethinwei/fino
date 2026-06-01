@@ -239,6 +239,7 @@ m, _ := openai.New("gpt-4o",
 | [`examples/hello`](examples/hello) | 最小的端到端跑通，带一条 hook 轨迹日志 |
 | [`examples/multi_mode`](examples/multi_mode) | 同一个 agent 在 `plan` / `code` 之间来回切 |
 | [`examples/streaming`](examples/streaming) | 消费 `Stream` 事件，逐字流式肉眼可见 |
+| [`examples/history_trim`](examples/history_trim) | 包装 `model.Model` 裁剪历史——一个包装器通吃所有 provider 的组合范式 |
 | [`examples/finocode`](examples/finocode) | 一个交互式编码 Agent（对标 Claude Code 的零依赖实现）：REPL 多轮、工具 y/N 授权 + 写文件 diff、mode 切换、handoff 子 agent、全套 hooks，还在临时目录里用真的 `go` 工具链编译运行模型写的代码 |
 
 所有示例默认对接 DeepSeek：

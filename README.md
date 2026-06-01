@@ -239,6 +239,7 @@ Implementing your own provider is just satisfying `model.Model` (`Generate` + `S
 | [`examples/hello`](examples/hello) | Minimal end-to-end run with a hook trace log |
 | [`examples/multi_mode`](examples/multi_mode) | One agent switching between `plan` and `code` modes |
 | [`examples/streaming`](examples/streaming) | Consuming `Stream` events with visible token-by-token output |
+| [`examples/history_trim`](examples/history_trim) | Wrapping `model.Model` to trim history — the composition pattern, one wrapper for all providers |
 | [`examples/finocode`](examples/finocode) | An interactive coding agent (a zero-dependency take on Claude Code): REPL, y/N tool authorization with write diffs, mode switching, handoff sub-agents, full hooks, and a real `go` toolchain in a temp workspace |
 
 All examples run against DeepSeek by default:
