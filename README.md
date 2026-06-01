@@ -4,7 +4,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+[![CI](https://github.com/nethinwei/fino/actions/workflows/ci.yml/badge.svg)](https://github.com/nethinwei/fino/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/nethinwei/fino.svg)](https://pkg.go.dev/github.com/nethinwei/fino)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nethinwei/fino)](https://goreportcard.com/report/github.com/nethinwei/fino)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Std-lib only](https://img.shields.io/badge/dependencies-stdlib%20only-success)](go.mod)

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/nethinwei/fino/discussions
+    about: Ask usage questions or discuss ideas here rather than opening an issue.
