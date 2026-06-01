@@ -209,6 +209,8 @@ func NewFunc[T any, R FuncReturn](
 
 不提供第二套 `NewResultFunc`，避免 API 分叉。
 
+返回值包装只识别 `FuncReturn` 约束允许的两种形态（`~string` 与 `Result`）。若未来扩展 `FuncReturn` 却漏掉对应分支，SDK 在该不可达分支返回 error 而非 panic——库代码不通过 panic 表达可恢复的内部不变量违例，调用方始终通过 `Tool.Run` 的 error 返回值感知。
+
 函数工具使用必要参数加选项：
 
 ```go
@@ -358,7 +360,23 @@ return
 
 非 nil `err` 表示迭代终止，之后不会再产生事件。消费者应优先检查第二个返回值，并可直接用 `errors.Is` / `errors.As` 判断 `ErrMaxTurns`、`ErrToolNotFound`、`ToolDeniedError` 或 `context.Canceled`。`model.StreamError` 事件的用途是让事件收集器保留最终错误快照，不表示可继续执行的中间事件。
 
-工具调用第一版按模型给出的顺序串行执行。原因是串行执行最可预测，Policy 和 Hooks 的顺序稳定，也避免给用户工具引入隐式并发安全要求。需要并行工具执行的用户可以在单个 Tool 内部自行并发，或未来通过显式 Runner 选项 opt-in。
+工具调用默认按模型给出的顺序串行执行。原因是串行执行最可预测，Policy 和 Hooks 的顺序稳定，也避免给用户工具引入隐式并发安全要求。
+
+需要并行工具执行的用户可以在单个 Tool 内部自行并发，或通过显式 Runner 选项 `runner.WithMaxConcurrency(n)` opt-in。该选项只影响单个工具批次（同一模型响应中的多个 tool_use）内的执行：
+
+- `n <= 1`（默认）：维持串行行为，无任何新增语义或并发安全要求。
+- `n > 1`：单批次内最多 `n` 个工具并发执行。
+
+并行模式保留以下确定性，把不可预测性降到最低：
+
+- **授权仍串行**：Runner 先按调用顺序串行完成工具解析与 `policy.Authorize`（不执行用户工具代码），保证 Policy 顺序稳定，并在第一个未找到或被拒绝的工具上 fail-fast。
+- **结果有序**：工具结果始终按调用顺序写回为一条 `tool` message，与完成顺序无关，符合 Anthropic / OpenAI 协议。
+- **fail-fast**：首个工具错误会取消同批次其余工具的派生 `context`；Runner 按调用顺序返回第一个错误，与串行路径"首错即返回"一致。
+- **Hooks ctx 作用域**：并行模式下 `BeforeTool` 返回的 `context` 只作用于该工具自身的 `Run` 与 `AfterTool`，不再线性串接到下一次模型调用；串行模式仍保持原有线性传递。
+- **handoff 末位生效**：若同一批次包含多个 handoff 工具，Runner 在收集完全部结果后按调用顺序应用切换，最后一个 handoff 生效，与串行覆盖语义一致。
+- **流式事件**：所有事件仍只在迭代器所在的单一 goroutine 上产生。`ToolCall` 事件按调用顺序发出，`ToolResult` 事件按完成顺序发出，`Handoff` 事件在批次结束后发出。
+
+开启 `n > 1` 后，用户工具必须可安全并发执行。
 
 ### 消息历史与 system 指令
 

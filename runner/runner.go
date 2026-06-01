@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/hooks"
@@ -49,10 +50,11 @@ func (e *ToolDeniedError) Unwrap() error {
 // Runner executes the ReAct loop against an Agent. It holds only configuration
 // (model, turn limit, policy, hooks); each Run owns its own message list.
 type Runner struct {
-	model    model.Model
-	maxTurns int
-	policy   policy.Policy
-	hooks    *hooks.Hooks
+	model          model.Model
+	maxTurns       int
+	policy         policy.Policy
+	hooks          *hooks.Hooks
+	maxConcurrency int
 }
 
 // Option configures a Runner.
@@ -92,6 +94,13 @@ func WithPolicy(p policy.Policy) Option {
 
 // WithHooks sets the lifecycle hooks observed during a run.
 func WithHooks(h *hooks.Hooks) Option { return func(r *Runner) { r.hooks = h } }
+
+// WithMaxConcurrency sets the maximum number of tools executed concurrently
+// within a single tool-call batch. A value of n <= 1 (the default) keeps tools
+// serial. A value of n > 1 executes up to n tools at once: the Runner still
+// authorizes all calls serially in call order, preserves result order, and is
+// fail-fast on the first error; user tools must be safe for concurrent use.
+func WithMaxConcurrency(n int) Option { return func(r *Runner) { r.maxConcurrency = n } }
 
 // Input is the initial message list for a run. Construct it with Text or
 // Messages rather than building it directly.
@@ -158,6 +167,22 @@ func (st *runState) switchTo(handoff agent.HandoffTool) error {
 	}
 	st.agent = target
 	st.mode = mode
+	return nil
+}
+
+// applyHandoffs switches the run state for each handoff tool in the batch, in
+// call order, so the last handoff wins. This matches the serial path, where
+// each handoff's switchTo overwrites the previous one.
+func (st *runState) applyHandoffs(selected []tool.Tool) error {
+	for _, t := range selected {
+		handoff, ok := t.(agent.HandoffTool)
+		if !ok {
+			continue
+		}
+		if err := st.switchTo(handoff); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -286,7 +311,12 @@ func (r *Runner) generate(ctx context.Context, st *runState) (context.Context, *
 
 // runToolCalls authorizes and executes each requested tool serially, then
 // appends a single RoleTool message holding all results to the run history.
+// When maxConcurrency > 1 and the batch has more than one call, it delegates
+// to runToolCallsParallel.
 func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, error) {
+	if r.maxConcurrency > 1 && len(calls) > 1 {
+		return r.runToolCallsParallel(ctx, st, calls)
+	}
 	_, toolsByName := collectTools(st.mode.Tools)
 	blocks := make([]message.Block, 0, len(calls))
 	for _, call := range calls {
@@ -331,6 +361,96 @@ func (r *Runner) handleToolCall(ctx context.Context, st *runState, toolsByName m
 		}
 	}
 	return ctx, block, nil
+}
+
+// authorizeBatch resolves and authorizes every call serially in call order.
+// Resolving and authorizing stay serial so Policy ordering is deterministic and
+// the batch fails fast on the first missing or denied tool, exactly as the
+// serial path does. It returns the selected tools indexed by call order.
+func (r *Runner) authorizeBatch(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, calls []message.ToolUse) ([]tool.Tool, error) {
+	selected := make([]tool.Tool, len(calls))
+	for i, call := range calls {
+		t, ok := toolsByName[call.Name]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", ErrToolNotFound, call.Name)
+		}
+		if err := r.authorize(ctx, st, t, call); err != nil {
+			return nil, err
+		}
+		selected[i] = t
+	}
+	return selected, nil
+}
+
+// toolOutcome is the result of one parallel tool execution, kept at its call
+// index so results stay in call order regardless of completion order.
+type toolOutcome struct {
+	out tool.Result
+	err error
+}
+
+// runToolCallsParallel authorizes all calls serially, executes the authorized
+// tools concurrently (bounded by maxConcurrency), appends one RoleTool message
+// with results in call order, and applies handoffs in call order. The first
+// error by call order cancels siblings and is returned.
+func (r *Runner) runToolCallsParallel(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, error) {
+	_, toolsByName := collectTools(st.mode.Tools)
+	selected, err := r.authorizeBatch(ctx, st, toolsByName, calls)
+	if err != nil {
+		r.onError(ctx, err)
+		return ctx, err
+	}
+	outcomes := r.executeParallel(ctx, st, selected, calls)
+	for _, oc := range outcomes {
+		if oc.err != nil {
+			r.onError(ctx, oc.err)
+			return ctx, oc.err
+		}
+	}
+	if err := st.applyHandoffs(selected); err != nil {
+		return ctx, err
+	}
+	st.history = append(st.history, message.ToolResults(resultBlocks(calls, outcomes)...))
+	return ctx, nil
+}
+
+// executeParallel runs every selected tool in its own goroutine, bounded by a
+// maxConcurrency-sized semaphore. The first error cancels a derived context so
+// ctx-aware siblings stop early. Results are written back at their call index.
+func (r *Runner) executeParallel(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse) []toolOutcome {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	outcomes := make([]toolOutcome, len(calls))
+	sem := make(chan struct{}, r.maxConcurrency)
+	var wg sync.WaitGroup
+	for i := range calls {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := ctx.Err(); err != nil {
+				outcomes[i] = toolOutcome{err: err}
+				return
+			}
+			_, out, err := r.execute(ctx, st, selected[i], calls[i])
+			outcomes[i] = toolOutcome{out: out, err: err}
+			if err != nil {
+				cancel()
+			}
+		}(i)
+	}
+	wg.Wait()
+	return outcomes
+}
+
+// resultBlocks builds tool_result blocks in call order from parallel outcomes.
+func resultBlocks(calls []message.ToolUse, outcomes []toolOutcome) []message.Block {
+	blocks := make([]message.Block, len(calls))
+	for i, call := range calls {
+		blocks[i] = message.NewToolResult(call.ID, call.Name, outcomes[i].out.Content, outcomes[i].out.IsError)
+	}
+	return blocks
 }
 
 func collectTools(tools []tool.Tool) ([]tool.Info, map[string]tool.Tool) {

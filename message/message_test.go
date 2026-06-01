@@ -16,6 +16,18 @@ func TestTextMessageHelpers(t *testing.T) {
 	}
 }
 
+func TestHasSystem(t *testing.T) {
+	if HasSystem(nil) {
+		t.Fatal("HasSystem(nil) = true, want false")
+	}
+	if HasSystem([]Message{UserText("hi"), Assistant(NewText("yo"))}) {
+		t.Fatal("HasSystem(no system) = true, want false")
+	}
+	if !HasSystem([]Message{UserText("hi"), SystemText("be useful")}) {
+		t.Fatal("HasSystem(with system) = false, want true")
+	}
+}
+
 func TestFlatJSONShape(t *testing.T) {
 	data, err := json.Marshal(NewText("hello"))
 	if err != nil {

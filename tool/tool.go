@@ -128,19 +128,20 @@ func (t *funcTool[T, R]) Run(ctx context.Context, input json.RawMessage) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	return wrapResult[R](out), nil
+	return wrapResult[R](out)
 }
 
-func wrapResult[R FuncReturn](v R) Result {
+func wrapResult[R FuncReturn](v R) (Result, error) {
 	switch r := any(v).(type) {
 	case string:
-		return Result{Content: []message.Block{message.NewText(r)}}
+		return Result{Content: []message.Block{message.NewText(r)}}, nil
 	case Result:
-		return r
+		return r, nil
 	default:
-		// Unreachable given the FuncReturn constraint. Panic to catch
-		// future constraint extensions that are not handled here.
-		panic(fmt.Sprintf("unhandled FuncReturn type: %T", v))
+		// Unreachable given the FuncReturn constraint; returned as an error
+		// (rather than a panic) so a future constraint extension that misses
+		// this switch degrades gracefully instead of crashing the caller.
+		return Result{}, fmt.Errorf("unhandled FuncReturn type: %T", v)
 	}
 }
 

@@ -655,6 +655,81 @@ func TestStreamNoFinalMessage(t *testing.T) {
 	}
 }
 
+// TestRunToolHooksFire covers the tool-lifecycle hooks not exercised by
+// TestStreamHooks: BeforeTool and AfterTool around a successful tool call.
+func TestRunToolHooksFire(t *testing.T) {
+	echo, _ := tool.NewFunc("echo", "Echo text", func(ctx context.Context, in echoInput) (string, error) {
+		return "ok", nil
+	})
+	m := &scriptedModel{responses: []message.Message{
+		message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"x"}`))),
+		message.Assistant(message.NewText("done")),
+	}}
+	var got []string
+	r, err := New(m, WithHooks(&hooks.Hooks{
+		BeforeTool: func(ctx context.Context, c hooks.ToolCall) context.Context {
+			got = append(got, "before:"+c.Tool.Name)
+			return ctx
+		},
+		AfterTool: func(ctx context.Context, res hooks.ToolResult) {
+			got = append(got, "after:"+res.Tool.Name+":"+res.Result.Text())
+		},
+	}))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+	if _, err := r.Run(context.Background(), testAgent(t, echo), Text("hi")); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	want := []string{"before:echo", "after:echo:ok"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("hook order = %v, want %v", got, want)
+	}
+}
+
+// TestRunOnErrorFires verifies OnError is invoked with the terminal error.
+func TestRunOnErrorFires(t *testing.T) {
+	m := &scriptedModel{responses: []message.Message{
+		message.Assistant(message.NewToolUse("call_1", "missing", json.RawMessage(`{}`))),
+	}}
+	var gotErr error
+	r, err := New(m, WithHooks(&hooks.Hooks{
+		OnError: func(ctx context.Context, err error) { gotErr = err },
+	}))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+	if _, err := r.Run(context.Background(), testAgent(t), Text("hi")); err == nil {
+		t.Fatal("Run error = nil, want ErrToolNotFound")
+	}
+	if !errors.Is(gotErr, ErrToolNotFound) {
+		t.Fatalf("OnError got %v, want ErrToolNotFound", gotErr)
+	}
+}
+
+// TestRunEmptyHooksStructSafe ensures an all-nil Hooks struct does not panic
+// and the run still completes through a tool call.
+func TestRunEmptyHooksStructSafe(t *testing.T) {
+	echo, _ := tool.NewFunc("echo", "Echo text", func(ctx context.Context, in echoInput) (string, error) {
+		return "ok", nil
+	})
+	m := &scriptedModel{responses: []message.Message{
+		message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"x"}`))),
+		message.Assistant(message.NewText("done")),
+	}}
+	r, err := New(m, WithHooks(&hooks.Hooks{}))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+	result, err := r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if result.Text() != "done" {
+		t.Fatalf("result = %q, want done", result.Text())
+	}
+}
+
 // streamOnlyModel implements model.Model with explicit stream events.
 type streamOnlyModel struct {
 	events     []model.Event   // single-turn events (used if turns is nil)

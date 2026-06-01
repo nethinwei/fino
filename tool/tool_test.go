@@ -62,3 +62,59 @@ func TestSchemaIncludesField(t *testing.T) {
 		t.Fatalf("schema missing query: %s", schema)
 	}
 }
+
+// TestGenerateSchemaTypeMapping exercises jsonType across every Go kind it
+// maps, including pointer indirection, so an inference regression is caught.
+func TestGenerateSchemaTypeMapping(t *testing.T) {
+	type nested struct {
+		X int `json:"x"`
+	}
+	type allTypes struct {
+		Flag   bool              `json:"flag"`
+		Count  int               `json:"count"`
+		Big    uint64            `json:"big"`
+		Ratio  float64           `json:"ratio"`
+		Tags   []string          `json:"tags"`
+		Arr    [2]int            `json:"arr"`
+		Meta   map[string]string `json:"meta"`
+		Nested nested            `json:"nested"`
+		Ptr    *int              `json:"ptr"`
+		Name   string            `json:"name"`
+	}
+	raw, err := GenerateSchema[allTypes]()
+	if err != nil {
+		t.Fatalf("GenerateSchema error: %v", err)
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type string `json:"type"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	want := map[string]string{
+		"flag":   "boolean",
+		"count":  "number",
+		"big":    "number",
+		"ratio":  "number",
+		"tags":   "array",
+		"arr":    "array",
+		"meta":   "object",
+		"nested": "object",
+		"ptr":    "number",
+		"name":   "string",
+	}
+	for field, wantType := range want {
+		if got := schema.Properties[field].Type; got != wantType {
+			t.Errorf("%s type = %q, want %q", field, got, wantType)
+		}
+	}
+}
+
+// TestGenerateSchemaRejectsNonStruct verifies the non-struct guard.
+func TestGenerateSchemaRejectsNonStruct(t *testing.T) {
+	if _, err := GenerateSchema[int](); err == nil {
+		t.Fatal("expected error for non-struct input")
+	}
+}

@@ -5,3 +5,9 @@
 *.test
 *.out
 /bin/
+
+# Compiled example binaries built into the repo root (go build ./examples/<name>)
+/finocode
+/hello
+/multi_mode
+/streaming

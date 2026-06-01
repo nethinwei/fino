@@ -84,7 +84,9 @@ type Option func(*config)
 
 type config struct {
 	temperature *float32
+	topP        *float32
 	maxTokens   *int
+	extra       map[any]any
 }
 
 // WithTemperature sets the generation temperature.
@@ -93,10 +95,31 @@ func WithTemperature(v float32) Option {
 	return func(c *config) { c.temperature = &temp }
 }
 
+// WithTopP sets the nucleus sampling probability mass. It is universal across
+// providers, so it lives in the core option set.
+func WithTopP(v float32) Option {
+	p := v
+	return func(c *config) { c.topP = &p }
+}
+
 // WithMaxTokens sets the maximum number of tokens to generate.
 func WithMaxTokens(v int) Option {
 	n := v
 	return func(c *config) { c.maxTokens = &n }
+}
+
+// WithExtra stores a provider-specific value keyed by an opaque key. It is the
+// single core primitive for provider extensions: provider packages wrap it in
+// typed options (e.g. openai.WithReasoningEffort) and read it back via
+// ExtraValue. Use an unexported key type per provider to avoid collisions, as
+// the context package does. The core never interprets these values.
+func WithExtra(key, value any) Option {
+	return func(c *config) {
+		if c.extra == nil {
+			c.extra = map[any]any{}
+		}
+		c.extra[key] = value
+	}
 }
 
 func newConfig(opts []Option) config {
@@ -107,4 +130,29 @@ func newConfig(opts []Option) config {
 		}
 	}
 	return cfg
+}
+
+// Config is the resolved set of model options. Provider adapters obtain it via
+// ApplyOptions to read user-supplied generation settings. A nil field means
+// the option was not set and the provider should omit it from the request.
+type Config struct {
+	Temperature *float32
+	TopP        *float32
+	MaxTokens   *int
+	// Extra holds provider-specific values set via WithExtra, keyed by the
+	// provider's opaque key. Read them with ExtraValue.
+	Extra map[any]any
+}
+
+// ApplyOptions resolves the given options into a Config for provider adapters.
+func ApplyOptions(opts ...Option) Config {
+	c := newConfig(opts)
+	return Config{Temperature: c.temperature, TopP: c.topP, MaxTokens: c.maxTokens, Extra: c.extra}
+}
+
+// ExtraValue returns the provider extra stored under key, typed as T. The
+// second result is false when the key is absent or holds a different type.
+func ExtraValue[T any](c Config, key any) (T, bool) {
+	v, ok := c.Extra[key].(T)
+	return v, ok
 }

@@ -30,11 +30,32 @@ func TestModelInterface(t *testing.T) {
 }
 
 func TestOptions(t *testing.T) {
-	cfg := newConfig([]Option{WithTemperature(0.7), WithMaxTokens(10)})
+	cfg := newConfig([]Option{WithTemperature(0.7), WithMaxTokens(10), WithTopP(0.9)})
 	if cfg.temperature == nil || *cfg.temperature != 0.7 {
 		t.Fatal("temperature not applied")
 	}
 	if cfg.maxTokens == nil || *cfg.maxTokens != 10 {
 		t.Fatal("max tokens not applied")
+	}
+	if cfg.topP == nil || *cfg.topP != 0.9 {
+		t.Fatal("top_p not applied")
+	}
+}
+
+type testKey struct{}
+
+func TestExtraOption(t *testing.T) {
+	cfg := ApplyOptions(WithExtra(testKey{}, "high"))
+	got, ok := ExtraValue[string](cfg, testKey{})
+	if !ok || got != "high" {
+		t.Fatalf("ExtraValue = %q, %v; want high, true", got, ok)
+	}
+	// Wrong type yields the zero value and false.
+	if n, ok := ExtraValue[int](cfg, testKey{}); ok || n != 0 {
+		t.Fatalf("ExtraValue[int] = %d, %v; want 0, false", n, ok)
+	}
+	// Absent key on an empty config is safe (nil map).
+	if _, ok := ExtraValue[string](ApplyOptions(), testKey{}); ok {
+		t.Fatal("absent key reported present")
 	}
 }
