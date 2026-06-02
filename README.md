@@ -282,6 +282,8 @@ The core never changes to add a capability — only, if ever, to expose a missin
 
 The API follows a consistent shape — `NewX(required, opts ...Option) (*X, error)` — and is approaching stability, but may still change before a tagged `v1`. Pin a commit if you need reproducibility.
 
+See [`docs/roadmap.md`](docs/roadmap.md) for the planned path toward typed tool effects, suspend/resume, execution tapes, and effect-aware concurrency.
+
 ## Contributing
 
 Issues and PRs are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the coding standards (Google Go Style, `gofmt`, TDD, no external core dependencies) and [`docs/design.md`](docs/design.md) for the design boundaries before changing core packages.
