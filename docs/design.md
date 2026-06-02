@@ -676,11 +676,11 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 
 ## 充分性命题
 
-`fino` 不靠增加核心能力取胜，而是**证明现有最小核心足以可靠表达 Agent 领域的难题**。
+`fino` 不靠增加应用层功能取胜，而是把可靠工具型 Agent 所需的执行机制压缩进一个可规约、可测试的小内核。
 
 命题：
 
-> 可靠的复杂 Agent 能力不需要框架，只需要正确的最小原语、精确语义和组合。
+> 复杂工具型 Agent 的可靠执行基础设施，不需要侵入应用的大型框架；它需要语义充分的运行时内核、显式副作用边界和可组合策略。
 
 这条命题把 `fino` 与边界模糊的框架区分开：后者主张“我替你实现了一切”，`fino` 主张“我证明了你从不需要那个框架”。前者是产品，后者是可被检验、可被引用的论断。
 
@@ -690,7 +690,7 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 2. **循环不变量**：用 property-based 测试在任意调度下验证语义性质，而非只做逐场景断言。
 3. **参考组合**：用核心之外的最小 add-on（重放、恢复、可观测、预算、评估）构造性地证明接缝足够。
 
-这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*，均已落地：完整规约见 `docs/spec/loop-semantics.md`，不变量验证见 `runner/invariants_test.go`，参考组合见 `x/` 目录。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
+这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前 v0.2.x 已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复和若干 `x/` 参考组合；完整的 effect-aware 审批恢复、execution tape、并发安全和幂等边界属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
 
 ## 形式化循环语义
 
@@ -728,7 +728,7 @@ State = (agent, mode, history, turn)
 
 一个 turn 定义为一次 `[T-MODEL]`。同一模型响应中的多个 tool call 属于同一 turn 的一次 `[T-TOOLS]`。handoff 后目标 agent 的下一次 `[T-MODEL]` 是新 turn。
 
-工具批次 `[T-TOOLS]` 有两种求值策略，对外部可观察结果**等价**：
+工具批次 `[T-TOOLS]` 有两种求值策略。当前保证是 Runner 协议轨迹等价，而不是任意外部状态等价：
 
 ```text
 serial   (maxConcurrency ≤ 1) : resolve→authorize→execute 按调用序逐个完成
@@ -736,11 +736,11 @@ parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至�
                                  结果按调用序写回；首错（按调用序）取消同批其余并返回
 ```
 
-两条策略满足同一组不变量（下节），这正是“并行不改变语义”的精确含义。
+该等价依赖工具独立性假设。未来 `tool.Effects.ParallelSafe` 会把该假设显式化；在此之前，用户启用 `WithMaxConcurrency` 时必须保证工具并发安全。
 
 ## 循环不变量
 
-下列性质对任意模型脚本、任意工具集、任意调度都成立，由 property-based / 状态机测试验证，而非逐场景断言。
+下列性质在各自前置条件下成立，由 property-based / 状态机测试验证 Runner 可观察的协议轨迹，而非逐场景断言。
 
 | 不变量 | 陈述 |
 |--------|------|
@@ -749,13 +749,13 @@ parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至�
 | 终止唯一 | `Run` 恰好返回一个 Result 或一个 error；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
 | OnError 一次 | 每个运行期终止错误恰好触发一次 `OnError` |
 | 授权先于执行 | 任一工具的 `Run` 之前，其 `Authorize` 已返回 `Allow` |
-| fail-fast 等价 | 并行路径返回的首个错误 == 串行路径在相同输入下返回的首个错误（按调用序） |
+| 协议轨迹等价 | 在工具独立性假设下，并行路径与串行路径保持结果顺序、首错选择和终止形态一致 |
 | handoff 末位生效 | 同批多个 handoff 时，最终 agent/mode == 最后一个 handoff 的目标 |
 | 无系统消息泄漏 | `history` 任何时刻都不含 Runner 注入的 system message |
 | ctx 忠实 | `ctx` 取消后不再有新的模型调用或工具调用副作用 |
-| 续跑完备 | `(pending tool calls, history, mode)` 足以无歧义恢复运行，无需任何隐藏 checkpoint |
+| 安全边界恢复完备 | 在 completed turn boundary 上，`history + mode` 足以继续运行；pending tool resume 是当前 opt-in 接缝，不是完整审批恢复语义 |
 
-最后一条“续跑完备”把“恢复”从核心的一个*功能*转化为核心的一个*可证明性质*。
+最后一条把安全边界恢复从核心的一个*功能*转化为核心的一个*可证明性质*。
 
 ## 接缝纪律
 
@@ -777,9 +777,9 @@ parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至�
 
 ### 重放（record & replay）
 
-- 依赖接缝：`model.Model` 与 `tool.Tool` 是唯一外部效应入口。
+- 依赖接缝：当前记录 `model.Model` 与 `tool.Tool` 的效应。
 - 实现：录制为包一层 Model/Tool 记录有序响应日志；重放为注入预录响应、旁路真实调用。
-- 证明：一次运行的全部不确定性可被这两个接口捕获与复现，核心循环本身确定。
+- 边界：Policy 决策、suspend/resume 决策和会影响行为的 interceptor 尚未进入完整 execution tape，因此当前 replay 只复现已记录的模型/工具轨迹，不证明完整执行等价。
 
 ```go
 type RecordingModel struct{ Next model.Model; Log *Log }
@@ -788,8 +788,8 @@ type ReplayModel struct{ Log *Log } // 不调用任何真实 provider
 
 ### 恢复（durable continuation）
 
-- 依赖接缝：不变量“续跑完备”。
-- 实现：序列化 `(history, mode)`——在安全边界（history 末尾为 tool 结果或 assistant 文本）上，待执行的工具调用已隐式存在于 history 的 assistant `tool_use` 块中，无需单独字段；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
+- 依赖接缝：当前不变量“安全边界恢复完备”。
+- 实现：在安全边界（history 末尾为 tool 结果、user 消息或无 pending tool_use 的 assistant 文本）上序列化 `(history, mode)`；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
 - 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的 HITL 续跑由唯一的最小接缝 `runner.WithResumeFromPendingTools()`（RunOption）支持：默认关闭、行为不变；opt-in 时在首个模型 turn 前先执行 history 末尾的 pending tools。它仍只暴露接缝、不引入 checkpoint/session/graph，`x/recover` 的 `Snapshot.ResumePending` 透传该接缝。见 `docs/spec/loop-semantics.md` §7.2。
 - 证明：崩溃恢复、长时运行无需核心新增中断子系统。
 

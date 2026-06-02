@@ -141,7 +141,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 
 ## 7. 不变量
 
-下列性质对任意模型脚本、任意工具集、任意并发调度都必须成立。`runner/invariants_test.go` 以 property-based / 状态机测试验证。
+下列性质必须在各自前置条件下成立。`runner/invariants_test.go` 以 property-based / 状态机测试验证 Runner 可观察的协议轨迹。
 
 | 编号 | 名称 | 形式陈述 |
 |------|------|----------|
@@ -150,23 +150,23 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 | I3 | 终止唯一 | `Run` 的输出 ∈ `{一个 Result, 一个 error}`，互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
 | I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1 |
 | I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `Allow` |
-| I6 | fail-fast 等价 | 固定输入下，并行返回的首个错误 == 串行返回的首个错误（按调用序） |
+| I6 | 协议轨迹等价 | 在工具独立、或后续声明为可安全并行的前提下，并行执行产生与串行相同的 Runner 协议轨迹（结果顺序、首错选择、终止形态） |
 | I7 | handoff 末位 | 同批含 handoff `[h_j … h_m]` 时，终态 `agent` == `h_m.TargetAgent()` |
 | I8 | 无系统泄漏 | ∀ 时刻，`∀ msg ∈ history: msg.Role ≠ system` |
 | I9 | ctx 忠实 | `ctx` 取消后不再发生新的 `model.Generate`/`model.Stream` 或 `tool.Run` |
-| I10 | 续跑完备 | `(toolUses(lastAssistant) 未完成部分, history, mode.Name)` 足以无歧义恢复运行 |
+| I10 | 安全边界恢复完备 | 在 completed turn boundary（history 末尾为 user/tool 消息或无 pending tool_use 的 assistant 消息）上，`(history, mode.Name)` 足以继续运行 |
 
-### 7.1 关于 I6（fail-fast 等价）与诱导取消
+### 7.1 关于 I6（协议轨迹等价）与诱导取消
 
-I6 要求并行批次返回的首个错误与串行（按调用序）相同。并行实现用 fail-fast 取消作为优化：首个失败者通过 `context.WithCancelCause(errSiblingFailed)` 取消兄弟工具。选首错时按调用序返回第一个**非诱导取消**的错误。
+I6 当前只承诺 Runner 可观察的协议轨迹等价：工具结果按调用序写回、首错按调用序选择、终止错误路径一致。它不承诺任意外部世界状态在并行与串行之间等价；该性质需要工具彼此独立，或在未来通过 `tool.Effects.ParallelSafe` 明确声明。
 
 诱导取消的判定（`isInducedCancel`）：错误是 `context.Canceled`、父 `ctx` 未取消、且 batch ctx 的 cause 为 `errSiblingFailed`。这意味着 **`context.Canceled` 被解释为“工具观测到取消”而非领域错误**。在此契约下 I6 对所有不把 `context.Canceled` 当作领域返回值的工具成立。
 
 边界（明确承认非完全串行等价）：若某低索引工具把 `context.Canceled` 当作自身领域错误返回，而同一批次中某兄弟工具并发失败先触发了取消，则该 `context.Canceled` 可能被标为诱导取消并被兄弟的真实错误取代——此时并行的首错与串行（会返回该低索引 `context.Canceled`）不一致。因此**工具不得用 `context.Canceled` 作为领域级返回值**；这是 I6 严格成立的前置契约。当低索引工具在兄弟取消之前就返回 `context.Canceled` 时，它不会被误标，I6 照常成立（见 `runner/v03_semantics_test.go`）。
 
-### 7.2 关于 I10（续跑完备）
+### 7.2 关于 I10（安全边界恢复完备）
 
-I10 是“恢复”能力的语义基础，但它**不要求核心实现恢复**。它要求：恢复所需的全部状态都已在 `Result`、事件或可重建的 history 中显式可见，从而恢复可在核心之外构造（见 `x/recover`）。
+I10 当前只承诺安全边界续跑：当 history 已完成一个 turn 边界时，恢复所需状态由 `history + mode.Name` 表达。批次中途 / HITL 场景由 `WithResumeFromPendingTools()` 暴露最小接缝，但它不是完整 approval runtime：它不会记录 Policy 决策、不会绑定审批对象与原始输入哈希，也不提供跨进程 exactly-once 副作用保证。
 
 I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 `runner/recover_seam_test.go`）：
 
@@ -178,6 +178,8 @@ I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 
   - **纪律**：这是*暴露接缝*而非*实现能力*——不引入 checkpoint / session / graph 概念，恢复所需状态仍只是 history + mode。`x/recover` 的 `Snapshot.Resume` 可经 `runner.WithResumeFromPendingTools()` 透传以覆盖该边界；推荐直接用便捷入口 `Snapshot.ResumePending`，它已内置该接缝。
 
   探针 `runner/recover_seam_test.go` 同时固定两侧行为：默认不自动执行 dangling 工具；启用接缝后执行之。
+
+未来若引入 `Suspend` / `ResumeApproved`，本节应拆分为安全边界恢复与一等审批恢复两套状态转移；在此之前，不得把该接缝描述为完整 HITL 恢复保证。
 
 ## 8. 一致性义务
 
