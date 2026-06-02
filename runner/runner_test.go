@@ -41,7 +41,7 @@ func (m *scriptedModel) Stream(ctx context.Context, messages []message.Message, 
 			yield(model.StreamError{Err: err}, err)
 			return
 		}
-		yield(model.FinalMessage{Message: *msg}, nil)
+		yield(model.TurnMessage{Message: *msg}, nil)
 	}
 }
 
@@ -344,7 +344,7 @@ func TestStreamForwardsModelEvents(t *testing.T) {
 			model.TextDelta{Text: "hel"},
 			model.TextDelta{Text: "lo"},
 			model.ContentBlockStop{Index: 0, Block: message.NewText("hello")},
-			model.FinalMessage{Message: message.Assistant(message.NewText("hello"))},
+			model.TurnMessage{Message: message.Assistant(message.NewText("hello"))},
 		},
 	}
 	r, err := New(m)
@@ -382,13 +382,13 @@ func TestStreamToolCallAndResult(t *testing.T) {
 				model.ContentBlockStart{Index: 0, Block: message.NewText("")},
 				model.TextDelta{Text: "calling echo"},
 				model.ContentBlockStop{Index: 0, Block: message.NewText("calling echo")},
-				model.FinalMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`)))},
+				model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`)))},
 			},
 			{
 				model.ContentBlockStart{Index: 0, Block: message.NewText("")},
 				model.TextDelta{Text: "done"},
 				model.ContentBlockStop{Index: 0, Block: message.NewText("done")},
-				model.FinalMessage{Message: message.Assistant(message.NewText("done"))},
+				model.TurnMessage{Message: message.Assistant(message.NewText("done"))},
 			},
 		},
 	}
@@ -431,11 +431,11 @@ func TestStreamHandoff(t *testing.T) {
 	m := &streamOnlyModel{
 		turns: [][]model.Event{
 			{
-				model.FinalMessage{Message: message.Assistant(message.NewToolUse("call_1", "handoff_to_target", json.RawMessage(`{}`)))},
+				model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "handoff_to_target", json.RawMessage(`{}`)))},
 			},
 			{
 				model.TextDelta{Text: "from target"},
-				model.FinalMessage{Message: message.Assistant(message.NewText("from target"))},
+				model.TurnMessage{Message: message.Assistant(message.NewText("from target"))},
 			},
 		},
 	}
@@ -464,7 +464,7 @@ func TestStreamPolicyDenial(t *testing.T) {
 	m := &streamOnlyModel{
 		turns: [][]model.Event{
 			{
-				model.FinalMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`)))},
+				model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`)))},
 			},
 		},
 	}
@@ -474,8 +474,10 @@ func TestStreamPolicyDenial(t *testing.T) {
 	}
 	var gotErr error
 	for _, err := range r.Stream(context.Background(), testAgent(t, echo), Text("hi")) {
-		gotErr = err
-		break
+		if err != nil {
+			gotErr = err
+			break
+		}
 	}
 	var tde *ToolDeniedError
 	if !errors.As(gotErr, &tde) {
@@ -486,7 +488,7 @@ func TestStreamPolicyDenial(t *testing.T) {
 func TestStreamHooks(t *testing.T) {
 	m := &streamOnlyModel{
 		events: []model.Event{
-			model.FinalMessage{Message: message.Assistant(message.NewText("ok"))},
+			model.TurnMessage{Message: message.Assistant(message.NewText("ok"))},
 		},
 	}
 	var before, after bool
@@ -514,7 +516,7 @@ func TestStreamMaxTurns(t *testing.T) {
 	// Each turn returns a tool call, never final answer
 	m := &streamOnlyModel{
 		repeatTurn: []model.Event{
-			model.FinalMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"x"}`)))},
+			model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"x"}`)))},
 		},
 	}
 	r, err := New(m, WithMaxTurns(2))
@@ -534,7 +536,7 @@ func TestStreamMaxTurns(t *testing.T) {
 }
 
 func TestStreamNilAgent(t *testing.T) {
-	m := &streamOnlyModel{events: []model.Event{model.FinalMessage{Message: message.Assistant(message.NewText("x"))}}}
+	m := &streamOnlyModel{events: []model.Event{model.TurnMessage{Message: message.Assistant(message.NewText("x"))}}}
 	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
@@ -552,7 +554,7 @@ func TestStreamNilAgent(t *testing.T) {
 }
 
 func TestStreamRejectsSystemMessageInHistory(t *testing.T) {
-	m := &streamOnlyModel{events: []model.Event{model.FinalMessage{Message: message.Assistant(message.NewText("x"))}}}
+	m := &streamOnlyModel{events: []model.Event{model.TurnMessage{Message: message.Assistant(message.NewText("x"))}}}
 	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
@@ -573,7 +575,7 @@ func TestStreamRejectsSystemMessageInHistory(t *testing.T) {
 func TestStreamMissingTool(t *testing.T) {
 	m := &streamOnlyModel{
 		turns: [][]model.Event{
-			{model.FinalMessage{Message: message.Assistant(message.NewToolUse("call_1", "nonexistent", json.RawMessage(`{}`)))}},
+			{model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "nonexistent", json.RawMessage(`{}`)))}},
 		},
 	}
 	r, err := New(m)
@@ -598,7 +600,7 @@ func TestStreamPolicyFailure(t *testing.T) {
 	})
 	m := &streamOnlyModel{
 		turns: [][]model.Event{
-			{model.FinalMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`)))}},
+			{model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`)))}},
 		},
 	}
 	r, err := New(m, WithPolicy(failPolicy{}))
@@ -618,7 +620,7 @@ func TestStreamPolicyFailure(t *testing.T) {
 }
 
 func TestStreamContextCancellation(t *testing.T) {
-	m := &streamOnlyModel{events: []model.Event{model.FinalMessage{Message: message.Assistant(message.NewText("ok"))}}}
+	m := &streamOnlyModel{events: []model.Event{model.TurnMessage{Message: message.Assistant(message.NewText("ok"))}}}
 	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
@@ -637,7 +639,7 @@ func TestStreamContextCancellation(t *testing.T) {
 	}
 }
 
-func TestStreamNoFinalMessage(t *testing.T) {
+func TestStreamNoTurnMessage(t *testing.T) {
 	m := &streamOnlyModel{events: []model.Event{model.TextDelta{Text: "partial"}}}
 	r, err := New(m)
 	if err != nil {
@@ -650,8 +652,30 @@ func TestStreamNoFinalMessage(t *testing.T) {
 			break
 		}
 	}
-	if gotErr == nil || gotErr.Error() != "stream ended without final message" {
-		t.Fatalf("error = %v, want stream ended without final message", gotErr)
+	if !errors.Is(gotErr, ErrStreamContract) {
+		t.Fatalf("error = %v, want ErrStreamContract", gotErr)
+	}
+}
+
+func TestStreamProviderFinalMessageIsContractError(t *testing.T) {
+	// A provider that yields FinalMessage (instead of TurnMessage) violates the
+	// stream contract; the Runner must surface it, not silently tolerate it.
+	m := &streamOnlyModel{events: []model.Event{
+		model.FinalMessage{Message: message.Assistant(message.NewText("x"))},
+	}}
+	r, err := New(m)
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+	var gotErr error
+	for _, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+	}
+	if !errors.Is(gotErr, ErrStreamContract) {
+		t.Fatalf("error = %v, want ErrStreamContract", gotErr)
 	}
 }
 

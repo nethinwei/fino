@@ -21,7 +21,7 @@ func (fakeModel) Stream(ctx context.Context, messages []message.Message, tools [
 		yield(ContentBlockStart{Index: 0, Block: message.NewText("")}, nil)
 		yield(TextDelta{Text: "ok"}, nil)
 		yield(ContentBlockStop{Index: 0, Block: message.NewText("ok")}, nil)
-		yield(FinalMessage{Message: message.Assistant(message.NewText("ok"))}, nil)
+		yield(TurnMessage{Message: message.Assistant(message.NewText("ok"))}, nil)
 	}
 }
 

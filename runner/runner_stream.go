@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"sync"
@@ -62,9 +61,10 @@ func (r *Runner) streamLoop(ctx context.Context, yield func(model.Event, error) 
 }
 
 // streamGenerate builds the model input, consumes the model's event stream
-// (forwarding events and capturing the final message), fires the model hooks,
-// and appends the response to history. The bool result is false when iteration
-// should stop: a stream error, a stopped consumer, or a missing final message.
+// (forwarding deltas and the turn's TurnMessage), fires the model hooks, and
+// appends the response to history. The bool result is false when iteration
+// should stop: a stream error, a stopped consumer, a stream-contract violation
+// (provider FinalMessage or a missing TurnMessage).
 func (r *Runner) streamGenerate(ctx context.Context, st *runState, yield func(model.Event, error) bool) (context.Context, *message.Message, bool) {
 	modelMessages := append([]message.Message{message.SystemText(st.mode.Instructions)}, st.history...)
 	modelOpts := append([]model.Option(nil), st.mode.ModelOptions...)
@@ -73,25 +73,43 @@ func (r *Runner) streamGenerate(ctx context.Context, st *runState, yield func(mo
 
 	ctx = r.beforeModel(ctx, st.agent.Name(), st.mode.Name, modelMessages, infos)
 
-	var finalMsg *message.Message
+	var turnMsg *message.Message
 	for event, err := range r.model.Stream(ctx, modelMessages, infos, modelOpts...) {
 		if err != nil {
 			r.emitErr(ctx, yield, err)
 			return ctx, nil, false
 		}
-		if fm, ok := event.(model.FinalMessage); ok {
-			msg := fm.Message
-			finalMsg = &msg
-			continue
-		}
-		if !yield(event, nil) {
+		// TurnMessage is the model layer's per-turn terminal event: it must be
+		// the last event of the turn. Any event after it (including a second
+		// TurnMessage) violates the stream contract.
+		if turnMsg != nil {
+			r.emitErr(ctx, yield, fmt.Errorf("%w: event after TurnMessage", ErrStreamContract))
 			return ctx, nil, false
 		}
+		switch ev := event.(type) {
+		case model.TurnMessage:
+			// Capture it and forward it as the turn snapshot; do not relay it raw.
+			msg := ev.Message
+			turnMsg = &msg
+			if !yield(model.TurnMessage{Message: msg}, nil) {
+				return ctx, nil, false
+			}
+		case model.FinalMessage:
+			// FinalMessage is the Runner's run-terminal event; a provider that
+			// yields it has violated the stream contract. Fail loudly.
+			r.emitErr(ctx, yield, fmt.Errorf("%w: provider yielded FinalMessage", ErrStreamContract))
+			return ctx, nil, false
+		default:
+			if !yield(event, nil) {
+				return ctx, nil, false
+			}
+		}
 	}
-	if finalMsg == nil {
-		r.emitErr(ctx, yield, errors.New("stream ended without final message"))
+	if turnMsg == nil {
+		r.emitErr(ctx, yield, fmt.Errorf("%w: stream ended without a TurnMessage", ErrStreamContract))
 		return ctx, nil, false
 	}
+	finalMsg := turnMsg
 	r.afterModel(ctx, st.agent.Name(), st.mode.Name, finalMsg)
 	st.history = append(st.history, *finalMsg)
 	return ctx, finalMsg, true
@@ -108,17 +126,24 @@ func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []mess
 	}
 	_, toolsByName := collectTools(st.mode.Tools)
 	blocks := make([]message.Block, 0, len(calls))
+	selected := make([]tool.Tool, 0, len(calls))
 	for _, call := range calls {
 		if err := ctx.Err(); err != nil {
 			r.emitErr(ctx, yield, err)
 			return ctx, false
 		}
-		newCtx, block, ok := r.handleStreamToolCall(ctx, st, toolsByName, call, yield)
+		newCtx, block, sel, ok := r.handleStreamToolCall(ctx, st, toolsByName, call, yield)
 		if !ok {
 			return ctx, false
 		}
 		ctx = newCtx
 		blocks = append(blocks, block)
+		selected = append(selected, sel)
+	}
+	// Handoffs apply at batch end (in call order), matching the parallel path
+	// and the non-streaming Run path; Handoff events are emitted after the batch.
+	if ctx, ok := r.emitHandoffs(ctx, st, selected, yield); !ok {
+		return ctx, false
 	}
 	st.history = append(st.history, message.ToolResults(blocks...))
 	return ctx, true
@@ -126,48 +151,62 @@ func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []mess
 
 // handleStreamToolCall resolves, authorizes, and executes one tool call,
 // emitting ToolCall and ToolResult events around execution and returning the
-// tool_result block. A handoff tool additionally switches the run state to the
-// target agent and emits a Handoff event.
-func (r *Runner) handleStreamToolCall(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, call message.ToolUse, yield func(model.Event, error) bool) (context.Context, message.Block, bool) {
+// tool_result block and the selected tool. Handoffs are deferred to batch end
+// by the caller via emitHandoffs.
+func (r *Runner) handleStreamToolCall(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, call message.ToolUse, yield func(model.Event, error) bool) (context.Context, message.Block, tool.Tool, bool) {
 	selected, ok := toolsByName[call.Name]
 	if !ok {
 		r.emitErr(ctx, yield, fmt.Errorf("%w: %q", ErrToolNotFound, call.Name))
-		return ctx, message.Block{}, false
+		return ctx, message.Block{}, nil, false
 	}
 	if err := r.authorize(ctx, st, selected, call); err != nil {
 		r.emitErr(ctx, yield, err)
-		return ctx, message.Block{}, false
+		return ctx, message.Block{}, nil, false
 	}
 	if !yield(model.ToolCall{Call: call}, nil) {
-		return ctx, message.Block{}, false
+		return ctx, message.Block{}, nil, false
 	}
 	ctx, out, err := r.execute(ctx, st, selected, call)
 	if err != nil {
 		r.emitErr(ctx, yield, err)
-		return ctx, message.Block{}, false
+		return ctx, message.Block{}, nil, false
 	}
 	if !yield(model.ToolResult{CallID: call.ID, Name: call.Name, Result: out}, nil) {
-		return ctx, message.Block{}, false
+		return ctx, message.Block{}, nil, false
 	}
 	block := message.NewToolResult(call.ID, call.Name, out.Content, out.IsError)
-	if handoff, isHandoff := selected.(agent.HandoffTool); isHandoff {
+	return ctx, block, selected, true
+}
+
+// emitHandoffs applies every handoff tool in the batch in call order (last
+// wins) and emits a Handoff event for each. It is shared by the serial and
+// parallel stream paths so handoffs are always batch-terminal.
+func (r *Runner) emitHandoffs(ctx context.Context, st *runState, selected []tool.Tool, yield func(model.Event, error) bool) (context.Context, bool) {
+	for _, t := range selected {
+		handoff, ok := t.(agent.HandoffTool)
+		if !ok {
+			continue
+		}
 		if err := st.switchTo(handoff); err != nil {
 			r.emitErr(ctx, yield, err)
-			return ctx, message.Block{}, false
+			return ctx, false
 		}
 		if !yield(model.Handoff{Target: st.agent.Name()}, nil) {
-			return ctx, message.Block{}, false
+			return ctx, false
 		}
 	}
-	return ctx, block, true
+	return ctx, true
 }
 
 // streamResult is one parallel tool execution carrying its call index so the
 // consumer can keep results in call order regardless of completion order.
+// inducedCancel mirrors toolOutcome: a context.Canceled caused by the batch's
+// own fail-fast cancellation rather than a genuine error.
 type streamResult struct {
-	index int
-	out   tool.Result
-	err   error
+	index         int
+	out           tool.Result
+	err           error
+	inducedCancel bool
 }
 
 // streamToolCallsParallel authorizes all calls serially, emits every ToolCall
@@ -188,25 +227,25 @@ func (r *Runner) streamToolCallsParallel(ctx context.Context, st *runState, call
 		}
 	}
 	ch, cancel := r.dispatchTools(ctx, st, selected, calls)
-	defer cancel()
+	defer cancel(nil)
 	outcomes, stopped := r.drainToolResults(ch, cancel, calls, yield)
 	if stopped {
 		return ctx, false
 	}
-	for _, oc := range outcomes {
-		if oc.err != nil {
-			r.emitErr(ctx, yield, oc.err)
-			return ctx, false
-		}
+	if err := r.firstBatchError(ctx, outcomes); err != nil {
+		r.emitErr(ctx, yield, err)
+		return ctx, false
 	}
 	return r.finalizeStreamBatch(ctx, st, selected, calls, outcomes, yield)
 }
 
 // dispatchTools launches one goroutine per call, bounded by a maxConcurrency
 // semaphore, and returns a channel that delivers each result then closes. The
-// returned cancel stops ctx-aware siblings; the first tool error also cancels.
-func (r *Runner) dispatchTools(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse) (<-chan streamResult, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(ctx)
+// returned cancel stops ctx-aware siblings; the first tool error also cancels
+// with cause errSiblingFailed so induced cancellations can be told apart.
+func (r *Runner) dispatchTools(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse) (<-chan streamResult, context.CancelCauseFunc) {
+	parent := ctx
+	ctx, cancel := context.WithCancelCause(ctx)
 	ch := make(chan streamResult, len(calls))
 	sem := make(chan struct{}, r.maxConcurrency)
 	var wg sync.WaitGroup
@@ -217,14 +256,15 @@ func (r *Runner) dispatchTools(ctx context.Context, st *runState, selected []too
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if err := ctx.Err(); err != nil {
-				ch <- streamResult{index: i, err: err}
+				ch <- streamResult{index: i, err: err, inducedCancel: isInducedCancel(parent, ctx, err)}
 				return
 			}
 			_, out, err := r.execute(ctx, st, selected[i], calls[i])
+			induced := isInducedCancel(parent, ctx, err)
 			if err != nil {
-				cancel()
+				cancel(errSiblingFailed)
 			}
-			ch <- streamResult{index: i, out: out, err: err}
+			ch <- streamResult{index: i, out: out, err: err, inducedCancel: induced}
 		}(i)
 	}
 	go func() { wg.Wait(); close(ch) }()
@@ -235,18 +275,18 @@ func (r *Runner) dispatchTools(ctx context.Context, st *runState, selected []too
 // ToolResult event for each successful tool as it arrives, and stores outcomes
 // at their call index. If the consumer stops, it cancels and keeps draining so
 // no goroutine leaks; the bool reports whether iteration should stop.
-func (r *Runner) drainToolResults(ch <-chan streamResult, cancel context.CancelFunc, calls []message.ToolUse, yield func(model.Event, error) bool) ([]toolOutcome, bool) {
+func (r *Runner) drainToolResults(ch <-chan streamResult, cancel context.CancelCauseFunc, calls []message.ToolUse, yield func(model.Event, error) bool) ([]toolOutcome, bool) {
 	outcomes := make([]toolOutcome, len(calls))
 	stopped := false
 	for res := range ch {
-		outcomes[res.index] = toolOutcome{out: res.out, err: res.err}
+		outcomes[res.index] = toolOutcome{out: res.out, err: res.err, inducedCancel: res.inducedCancel}
 		if stopped || res.err != nil {
 			continue
 		}
 		call := calls[res.index]
 		if !yield(model.ToolResult{CallID: call.ID, Name: call.Name, Result: res.out}, nil) {
 			stopped = true
-			cancel()
+			cancel(errSiblingFailed)
 		}
 	}
 	return outcomes, stopped
@@ -255,18 +295,8 @@ func (r *Runner) drainToolResults(ch <-chan streamResult, cancel context.CancelF
 // finalizeStreamBatch applies handoffs in call order, emitting a Handoff event
 // for each, then appends the batched RoleTool message in call order.
 func (r *Runner) finalizeStreamBatch(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, outcomes []toolOutcome, yield func(model.Event, error) bool) (context.Context, bool) {
-	for _, t := range selected {
-		handoff, ok := t.(agent.HandoffTool)
-		if !ok {
-			continue
-		}
-		if err := st.switchTo(handoff); err != nil {
-			r.emitErr(ctx, yield, err)
-			return ctx, false
-		}
-		if !yield(model.Handoff{Target: st.agent.Name()}, nil) {
-			return ctx, false
-		}
+	if ctx, ok := r.emitHandoffs(ctx, st, selected, yield); !ok {
+		return ctx, false
 	}
 	st.history = append(st.history, message.ToolResults(resultBlocks(calls, outcomes)...))
 	return ctx, true

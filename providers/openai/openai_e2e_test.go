@@ -158,7 +158,7 @@ func TestStreamParsesSSE(t *testing.T) {
 		switch e := ev.(type) {
 		case model.TextDelta:
 			text += e.Text
-		case model.FinalMessage:
+		case model.TurnMessage:
 			fm := e.Message
 			final = &fm
 		}

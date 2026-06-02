@@ -44,7 +44,7 @@ func TestStreamEmitsThinking(t *testing.T) {
 		case model.TextDelta:
 			kinds = append(kinds, "text")
 			text += e.Text
-		case model.FinalMessage:
+		case model.TurnMessage:
 			fm := e.Message
 			final = &fm
 		}

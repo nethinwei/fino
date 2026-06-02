@@ -75,7 +75,7 @@ func (p *scriptedProvider) Generate(context.Context, []message.Message, []tool.I
 func (p *scriptedProvider) Stream(ctx context.Context, m []message.Message, t []tool.Info, o ...model.Option) iter.Seq2[model.Event, error] {
 	return func(yield func(model.Event, error) bool) {
 		msg, _ := p.Generate(ctx, m, t, o...)
-		yield(model.FinalMessage{Message: *msg}, nil)
+		yield(model.TurnMessage{Message: *msg}, nil)
 	}
 }
 

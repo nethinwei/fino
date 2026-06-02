@@ -339,17 +339,21 @@ for event, err := range events {
 
 流式循环规则：
 
+事件分层：`model.TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 provider 的 `model.Stream` 产生；`model.FinalMessage` 是 **Runner 层**整个 run 的终态结果，只由 `Runner.Stream` 发出一次。二者语义不重叠。
+
 1. Runner 调用 `model.Stream` 并转发模型语义事件。
-2. Provider 适配器负责积累流并发出 `final message` 事件。
-3. Runner 只在收到当前 turn 的 final message 后解析工具调用。
-4. 若没有工具调用，已转发的 `final message` 就是最终输出，Runner 结束且不再发第二个 final event。
+2. Provider 适配器积累流，并在每个 turn 末尾发出恰好一个 `model.TurnMessage`（不得发 `FinalMessage`，其后不得再有事件）；Runner 逐 turn 转发该快照。
+3. Runner 只在收到当前 turn 的 `TurnMessage` 后解析工具调用。
+4. 若没有工具调用，Runner 在该 turn 后额外发出恰好一个 `model.FinalMessage` 作为整个 run 的终态输出，然后结束迭代。
 5. 若存在工具调用，Runner 对每个工具调用触发 Policy、Hooks 和工具执行。
-6. Runner 发出 tool call 与 tool result 事件。
+6. Runner 发出 tool call 与 tool result 事件；handoff 在批次结束后发出。
 7. Runner 将本轮所有工具结果作为一条 tool message 追加，再进入下一轮 `model.Stream`。
 
-这样 UI 可以实时渲染文本，同时工具执行仍保持确定的 turn 边界。
+若 provider 违反契约（缺失 `TurnMessage`、发出第二个 `TurnMessage`、`TurnMessage` 后继续发事件、或发出 `FinalMessage`），Runner 报 `runner.ErrStreamContract`（运行期终止错误），不静默兼容。
 
-流式模式下 Hooks 的语义与 `Run` 一致，但 `BeforeModel` / `AfterModel` 覆盖完整模型流：`BeforeModel` 在每个 turn 调用 `model.Stream` 前触发，`AfterModel` 在收到该 turn 的 `model.FinalMessage` 后触发。`BeforeTool` / `AfterTool` 在工具执行前后触发。`OnError` 对任何终止错误触发一次，然后 Runner 产出终止错误并停止迭代。
+这样 UI 可以实时渲染文本，含工具调用的中间 turn 的完整 assistant 快照也可被观测与重放，同时工具执行仍保持确定的 turn 边界。
+
+流式模式下 Hooks 的语义与 `Run` 一致，但 `BeforeModel` / `AfterModel` 覆盖完整模型流：`BeforeModel` 在每个 turn 调用 `model.Stream` 前触发，`AfterModel` 在收到该 turn 的 `model.TurnMessage` 后触发。`BeforeTool` / `AfterTool` 在工具执行前后触发。`OnError` 对任何终止错误触发一次，然后 Runner 产出终止错误并停止迭代。
 
 流式错误语义保持单一：任何会终止运行的错误都通过 iterator 的第二个返回值返回，并配对一个最终 `model.StreamError{Err: err}` 事件：
 
@@ -738,7 +742,7 @@ parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至�
 |--------|------|
 | 结果有序 | `tool_result` 块顺序 == 对应 `tool_use` 调用顺序，与完成顺序无关 |
 | 批次单消息 | 每个产生工具调用的 assistant turn 恰好追加一条 `RoleTool` 消息 |
-| 终止唯一 | `Run` 恰好返回一个 Result 或一个 error；`Stream` 至多一个 `FinalMessage` 终态，且终止错误恰好配一个 `StreamError` |
+| 终止唯一 | `Run` 恰好返回一个 Result 或一个 error；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
 | OnError 一次 | 每个运行期终止错误恰好触发一次 `OnError` |
 | 授权先于执行 | 任一工具的 `Run` 之前，其 `Authorize` 已返回 `Allow` |
 | fail-fast 等价 | 并行路径返回的首个错误 == 串行路径在相同输入下返回的首个错误（按调用序） |

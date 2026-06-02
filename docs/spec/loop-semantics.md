@@ -106,14 +106,21 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 
 `Stream` 与 `Run` 共享 §3–§4 的状态转移，附加事件语义：
 
+事件分层（关键）：`TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 `model.Model.Stream` 产生；`FinalMessage` 是 **Runner 层**整个 run 的终态结果，只由 `Runner.Stream` 在最后一个无工具调用的 turn 之后发出一次。两者语义不重叠。
+
 ```text
-- 转发 model.Stream 的语义事件（ContentBlockStart/Delta/Stop、TextDelta、FinalMessage）。
-- 仅在收到当前 turn 的 FinalMessage 后解析 toolUses 并执行工具。
+- model.Stream 契约: 每个 turn 必须 yield 恰好一个 TurnMessage 作为终结事件，且不得 yield FinalMessage；
+  TurnMessage 之后不得再有任何事件。违反者（缺失 TurnMessage、第二个 TurnMessage、TurnMessage 后继续发事件、
+  任何 FinalMessage）由 Runner 报 ErrStreamContract（运行期终止错误）。
+- 转发 model.Stream 的语义事件（ContentBlockStart/Delta/Stop、TextDelta）；每个 turn 的 TurnMessage 也按 turn 转发，
+  使含工具调用的中间 turn 的完整 assistant 快照可观测、可重放。
+- 仅在收到当前 turn 的 TurnMessage 后解析 toolUses 并执行工具。
 - 每个工具调用前发 ToolCall，调用后发 ToolResult；handoff 在批次结束后发 Handoff。
+- 整个 run 的最后一个 turn（无工具调用）之后，Runner 额外发出恰好一个 FinalMessage 作为 run 终态。
 - 所有事件只在迭代器所在的单一 goroutine 上产生。
   ToolCall 按调用序发出；ToolResult 按完成序发出；Handoff 在批次结束后发出。
 - 终止错误: yield(StreamError{Err: err}, err) 后停止迭代，且仅此一次。
-- Hooks: BeforeModel 在每个 turn 调用 model.Stream 前；AfterModel 在收到该 turn FinalMessage 后；
+- Hooks: BeforeModel 在每个 turn 调用 model.Stream 前；AfterModel 在收到该 turn TurnMessage 后；
          OnError 对任一终止错误触发一次（见 §6 与 §7 关于构造期错误的差异）。
 ```
 
@@ -121,7 +128,8 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 
 ```text
 运行期终止错误（进入 ReAct 循环后）: 模型调用失败、ErrToolNotFound、Policy 拒绝(ToolDeniedError)、
-                                    Policy 系统故障、工具执行错误、ctx 取消、ErrMaxTurns。
+                                    Policy 系统故障、工具执行错误、ctx 取消、ErrMaxTurns、
+                                    ErrStreamContract（仅 Stream：model.Stream 违反事件契约）。
                                     ⟶ 触发 OnError 恰好一次。
 
 构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、所选 mode 不存在。
@@ -129,7 +137,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
                                     ⟶ Stream: 经 iterator 第二返回值并配 StreamError 报告，触发 OnError。
 ```
 
-可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）。消费者用 `errors.Is` / `errors.As` 分支。
+可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`。消费者用 `errors.Is` / `errors.As` 分支。
 
 ## 7. 不变量
 
@@ -139,7 +147,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 |------|------|----------|
 | I1 | 结果有序 | 追加的 `ToolResults` 中第 i 个 `tool_result` 的 `ToolUseID` == 第 i 个 `tool_use` 的 `ID` |
 | I2 | 批次单消息 | 每次 `[T-TOOLS]` 恰好向 history 追加一条 `RoleTool` 消息 |
-| I3 | 终止唯一 | `Run` 的输出 ∈ `{一个 Result, 一个 error}`，互斥；`Stream` 终态至多一个 `FinalMessage`，终止错误恰好配一个 `StreamError` |
+| I3 | 终止唯一 | `Run` 的输出 ∈ `{一个 Result, 一个 error}`，互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
 | I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1 |
 | I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `Allow` |
 | I6 | fail-fast 等价 | 固定输入下，并行返回的首个错误 == 串行返回的首个错误（按调用序） |
@@ -148,7 +156,15 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 | I9 | ctx 忠实 | `ctx` 取消后不再发生新的 `model.Generate`/`model.Stream` 或 `tool.Run` |
 | I10 | 续跑完备 | `(toolUses(lastAssistant) 未完成部分, history, mode.Name)` 足以无歧义恢复运行 |
 
-### 7.1 关于 I10（续跑完备）
+### 7.1 关于 I6（fail-fast 等价）与诱导取消
+
+I6 要求并行批次返回的首个错误与串行（按调用序）相同。并行实现用 fail-fast 取消作为优化：首个失败者通过 `context.WithCancelCause(errSiblingFailed)` 取消兄弟工具。选首错时按调用序返回第一个**非诱导取消**的错误。
+
+诱导取消的判定（`isInducedCancel`）：错误是 `context.Canceled`、父 `ctx` 未取消、且 batch ctx 的 cause 为 `errSiblingFailed`。这意味着 **`context.Canceled` 被解释为“工具观测到取消”而非领域错误**。在此契约下 I6 对所有不把 `context.Canceled` 当作领域返回值的工具成立。
+
+边界（明确承认非完全串行等价）：若某低索引工具把 `context.Canceled` 当作自身领域错误返回，而同一批次中某兄弟工具并发失败先触发了取消，则该 `context.Canceled` 可能被标为诱导取消并被兄弟的真实错误取代——此时并行的首错与串行（会返回该低索引 `context.Canceled`）不一致。因此**工具不得用 `context.Canceled` 作为领域级返回值**；这是 I6 严格成立的前置契约。当低索引工具在兄弟取消之前就返回 `context.Canceled` 时，它不会被误标，I6 照常成立（见 `runner/v03_semantics_test.go`）。
+
+### 7.2 关于 I10（续跑完备）
 
 I10 是“恢复”能力的语义基础，但它**不要求核心实现恢复**。它要求：恢复所需的全部状态都已在 `Result`、事件或可重建的 history 中显式可见，从而恢复可在核心之外构造（见 `x/recover`）。
 

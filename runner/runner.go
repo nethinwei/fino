@@ -28,6 +28,10 @@ var (
 	ErrSystemMessageInHistory = errors.New("system message in history")
 	// ErrToolDenied is the sentinel wrapped by ToolDeniedError when a Policy denies a tool call.
 	ErrToolDenied = errors.New("tool denied")
+	// ErrStreamContract indicates a model.Model.Stream implementation violated
+	// its event contract: it must yield exactly one TurnMessage per turn and must
+	// not yield FinalMessage (FinalMessage is emitted only by the Runner).
+	ErrStreamContract = errors.New("model stream contract violated")
 )
 
 // ToolDeniedError reports that a Policy denied a tool invocation. It wraps
@@ -319,48 +323,53 @@ func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message
 	}
 	_, toolsByName := collectTools(st.mode.Tools)
 	blocks := make([]message.Block, 0, len(calls))
+	selected := make([]tool.Tool, 0, len(calls))
 	for _, call := range calls {
 		if err := ctx.Err(); err != nil {
 			r.onError(ctx, err)
 			return ctx, err
 		}
-		newCtx, block, err := r.handleToolCall(ctx, st, toolsByName, call)
+		newCtx, block, sel, err := r.handleToolCall(ctx, st, toolsByName, call)
 		if err != nil {
 			return ctx, err
 		}
 		ctx = newCtx
 		blocks = append(blocks, block)
+		selected = append(selected, sel)
+	}
+	// Apply handoffs only after the whole batch executes, in call order, so all
+	// tools in the batch run under the pre-handoff mode and the serial path
+	// matches the parallel path (loop-semantics §4 equivalence; handoff is
+	// batch-terminal).
+	if err := st.applyHandoffs(selected); err != nil {
+		return ctx, err
 	}
 	st.history = append(st.history, message.ToolResults(blocks...))
 	return ctx, nil
 }
 
 // handleToolCall resolves, authorizes, and executes one tool call, returning
-// its tool_result block. A handoff tool additionally switches the run state to
-// the target agent after its result is recorded.
-func (r *Runner) handleToolCall(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, call message.ToolUse) (context.Context, message.Block, error) {
+// its tool_result block and the selected tool. Handoffs are not applied here;
+// the caller applies them after the batch so attribution stays on the
+// pre-handoff mode.
+func (r *Runner) handleToolCall(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, call message.ToolUse) (context.Context, message.Block, tool.Tool, error) {
 	selected, ok := toolsByName[call.Name]
 	if !ok {
 		err := fmt.Errorf("%w: %q", ErrToolNotFound, call.Name)
 		r.onError(ctx, err)
-		return ctx, message.Block{}, err
+		return ctx, message.Block{}, nil, err
 	}
 	if err := r.authorize(ctx, st, selected, call); err != nil {
 		r.onError(ctx, err)
-		return ctx, message.Block{}, err
+		return ctx, message.Block{}, nil, err
 	}
 	ctx, out, err := r.execute(ctx, st, selected, call)
 	if err != nil {
 		r.onError(ctx, err)
-		return ctx, message.Block{}, err
+		return ctx, message.Block{}, nil, err
 	}
 	block := message.NewToolResult(call.ID, call.Name, out.Content, out.IsError)
-	if handoff, isHandoff := selected.(agent.HandoffTool); isHandoff {
-		if err := st.switchTo(handoff); err != nil {
-			return ctx, message.Block{}, err
-		}
-	}
-	return ctx, block, nil
+	return ctx, block, selected, nil
 }
 
 // authorizeBatch resolves and authorizes every call serially in call order.
@@ -382,11 +391,22 @@ func (r *Runner) authorizeBatch(ctx context.Context, st *runState, toolsByName m
 	return selected, nil
 }
 
+// errSiblingFailed is the cancellation cause used to stop sibling tools after
+// the first failure in a parallel batch. It lets the runner tell an
+// internally-induced cancellation apart from a genuine tool error or an
+// external (parent ctx) cancellation.
+var errSiblingFailed = errors.New("runner: sibling tool failed")
+
 // toolOutcome is the result of one parallel tool execution, kept at its call
 // index so results stay in call order regardless of completion order.
+// inducedCancel marks a context.Canceled that was caused by the batch's own
+// fail-fast cancellation (not a genuine tool error or external cancellation);
+// such outcomes are skipped when selecting the first error so the returned
+// error matches the serial path (loop-semantics I6).
 type toolOutcome struct {
-	out tool.Result
-	err error
+	out           tool.Result
+	err           error
+	inducedCancel bool
 }
 
 // runToolCallsParallel authorizes all calls serially, executes the authorized
@@ -401,11 +421,9 @@ func (r *Runner) runToolCallsParallel(ctx context.Context, st *runState, calls [
 		return ctx, err
 	}
 	outcomes := r.executeParallel(ctx, st, selected, calls)
-	for _, oc := range outcomes {
-		if oc.err != nil {
-			r.onError(ctx, oc.err)
-			return ctx, oc.err
-		}
+	if err := r.firstBatchError(ctx, outcomes); err != nil {
+		r.onError(ctx, err)
+		return ctx, err
 	}
 	if err := st.applyHandoffs(selected); err != nil {
 		return ctx, err
@@ -414,12 +432,32 @@ func (r *Runner) runToolCallsParallel(ctx context.Context, st *runState, calls [
 	return ctx, nil
 }
 
+// firstBatchError returns the batch's terminating error matching the serial
+// path: an external (parent ctx) cancellation outranks everything; otherwise it
+// is the first error by call order that is not an internally-induced
+// cancellation. Internally-induced cancellations are skipped because the serial
+// path never cancels lower-index siblings.
+func (r *Runner) firstBatchError(parent context.Context, outcomes []toolOutcome) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	for _, oc := range outcomes {
+		if oc.err != nil && !oc.inducedCancel {
+			return oc.err
+		}
+	}
+	return nil
+}
+
 // executeParallel runs every selected tool in its own goroutine, bounded by a
-// maxConcurrency-sized semaphore. The first error cancels a derived context so
-// ctx-aware siblings stop early. Results are written back at their call index.
+// maxConcurrency-sized semaphore. The first error cancels a derived context
+// (with cause errSiblingFailed) so ctx-aware siblings stop early; those induced
+// cancellations are tagged so they do not shadow the genuine first error.
+// Results are written back at their call index.
 func (r *Runner) executeParallel(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse) []toolOutcome {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	parent := ctx
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	outcomes := make([]toolOutcome, len(calls))
 	sem := make(chan struct{}, r.maxConcurrency)
 	var wg sync.WaitGroup
@@ -430,18 +468,29 @@ func (r *Runner) executeParallel(ctx context.Context, st *runState, selected []t
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if err := ctx.Err(); err != nil {
-				outcomes[i] = toolOutcome{err: err}
+				outcomes[i] = toolOutcome{err: err, inducedCancel: isInducedCancel(parent, ctx, err)}
 				return
 			}
 			_, out, err := r.execute(ctx, st, selected[i], calls[i])
-			outcomes[i] = toolOutcome{out: out, err: err}
+			outcomes[i] = toolOutcome{out: out, err: err, inducedCancel: isInducedCancel(parent, ctx, err)}
 			if err != nil {
-				cancel()
+				cancel(errSiblingFailed)
 			}
 		}(i)
 	}
 	wg.Wait()
 	return outcomes
+}
+
+// isInducedCancel reports whether err is a context.Canceled produced by the
+// batch's own fail-fast cancellation (cause errSiblingFailed) while the parent
+// context is still live. A tool that returns context.Canceled on its own (no
+// sibling has cancelled the batch yet) is treated as a genuine error.
+func isInducedCancel(parent, batch context.Context, err error) bool {
+	return err != nil &&
+		errors.Is(err, context.Canceled) &&
+		parent.Err() == nil &&
+		context.Cause(batch) == errSiblingFailed
 }
 
 // resultBlocks builds tool_result blocks in call order from parallel outcomes.
