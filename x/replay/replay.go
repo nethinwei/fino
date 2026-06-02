@@ -35,9 +35,13 @@ import (
 var emptyObjSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
 
 // ToolRecord is one recorded tool execution. A run replays a tool by matching
-// on Name and Input.
+// on Name and Input. CallID is the tool_use ID captured from the Runner's
+// tool.ExecutionContext when present; it gives the tape per-call correlation
+// (audit and idempotency share the same identifier) but is not used for replay
+// matching. Legacy fixtures without it load with CallID empty.
 type ToolRecord struct {
 	Name   string          `json:"name"`
+	CallID string          `json:"callID,omitempty"`
 	Input  json.RawMessage `json:"input,omitempty"`
 	Result tool.Result     `json:"result"`
 	Err    string          `json:"err,omitempty"`
@@ -179,6 +183,9 @@ func (t recordingTool) Info() tool.Info { return t.next.Info() }
 func (t recordingTool) Run(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	out, err := t.next.Run(ctx, input)
 	rec := ToolRecord{Name: t.next.Info().Name, Input: input, Result: out}
+	if ec, ok := tool.ExecutionContextFrom(ctx); ok {
+		rec.CallID = ec.ToolCallID
+	}
 	if err != nil {
 		rec.Err = err.Error()
 	}

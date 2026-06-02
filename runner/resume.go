@@ -46,6 +46,12 @@ type SuspendedRun struct {
 	LastAgentName string
 	LastMode      string
 	PendingCalls  []PendingToolCall
+	// RunID is the run-scoped identifier captured at suspend time (empty when
+	// the original run used no WithRunID). ResumeApproved restores it so
+	// approved and previously-allowed calls receive the same
+	// tool.ExecutionContext.IdempotencyKey they would have in the original run
+	// (loop-semantics I13). Fixtures without it deserialize to "".
+	RunID string
 }
 
 // Approval is a human decision about one suspended tool call, matched to the
@@ -90,6 +96,7 @@ func (r *Result) SuspendedRun() (SuspendedRun, error) {
 		LastAgentName: name,
 		LastMode:      r.LastMode,
 		PendingCalls:  r.PendingCalls,
+		RunID:         r.runID,
 	}, nil
 }
 
@@ -120,6 +127,10 @@ func (r *Runner) ResumeApproved(ctx context.Context, a *agent.Agent, suspended S
 			opt(&cfg)
 		}
 	}
+	// The resumed batch's IdempotencyKey must match the original run, so the
+	// suspended RunID always wins over any WithRunID passed on resume
+	// (loop-semantics I13).
+	cfg.runID = suspended.RunID
 	// Mode cannot be overridden on resume: the suspended batch's tool_uses were
 	// resolved against suspended.LastMode, so resuming in another mode would
 	// resolve them in the wrong tool set. Other run options (e.g. model options)

@@ -284,7 +284,7 @@ The core never changes to add a capability — only, if ever, to expose a missin
 
 The API follows a consistent shape — `NewX(required, opts ...Option) (*X, error)` — and is approaching stability, but may still change before a tagged `v1`. Pin a commit if you need reproducibility.
 
-See [`docs/roadmap.md`](docs/roadmap.md) for the planned path toward effect-aware concurrency and the idempotency boundary.
+Effect-aware concurrency (`WithMaxConcurrency` gated by `Effects.ParallelSafe`) and the idempotency boundary (`tool.ExecutionContext` + `WithRunID`) have landed. See [`docs/roadmap.md`](docs/roadmap.md) for the remaining path toward the reference-proof case study.
 
 ## Contributing
 

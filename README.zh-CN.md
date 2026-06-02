@@ -284,7 +284,7 @@ replay tape 是可复现性与审计证据，不证明业务正确性；它不�
 
 API 风格是统一的（`NewX(required, opts ...Option) (*X, error)`），整体在往稳定走，但打出 `v1` tag 之前还可能改。要保证可复现，先 pin 到某个 commit。
 
-后续 effect-aware concurrency 与幂等边界的演进路径见 [`docs/roadmap.md`](docs/roadmap.md)。
+effect-aware concurrency（`WithMaxConcurrency` 受 `Effects.ParallelSafe` 把关）与幂等边界（`tool.ExecutionContext` + `WithRunID`）已落地。后续到参考证明案例的演进路径见 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 参与进来
 

@@ -693,7 +693,7 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 2. **循环不变量**：用 property-based 测试在任意调度下验证语义性质，而非只做逐场景断言。
 3. **参考组合**：用核心之外的最小 add-on（重放、恢复、可观测、预算、评估）构造性地证明接缝足够。
 
-这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复、人工审批恢复（`ResumeApproved`，I12）、`x/replay` 的 execution tape（模型/Policy/工具/suspend/approval/resume/termination）和若干 `x/` 参考组合；effect-aware 并发与幂等边界属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
+这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复、人工审批恢复（`ResumeApproved`，I12）、`x/replay` 的 execution tape（模型/Policy/工具/suspend/approval/resume/termination）、effect-aware 并发（`WithMaxConcurrency` 受 `Effects.ParallelSafe` 把关，I6）、幂等边界（`tool.ExecutionContext` + `WithRunID`，I13）和若干 `x/` 参考组合；剩余的参考证明案例（PR7）属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
 
 ## 形式化循环语义
 

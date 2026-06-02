@@ -56,7 +56,7 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 | PR3 | Approved resume | Add `SuspendedRun`, `PendingToolCall`, `Approval`, and `Runner.ResumeApproved`. | v0.4.0 |
 | PR4 ✅ | Execution tape | Define recorded model, policy, tool, suspension, resume, and termination events. | v0.5.0 |
 | PR5 ✅ | Effect-aware concurrency | Make `WithMaxConcurrency` honor `Effects.ParallelSafe` by default. | v0.6.0 |
-| PR6 | Idempotency boundary | Define idempotency keys and retry constraints without automatic write retries. | v0.6.0 |
+| PR6 ✅ | Idempotency boundary | Define idempotency keys and retry constraints without automatic write retries. | v0.6.0 |
 | PR7 | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
 
 ## PR0: Contract Scope
@@ -178,8 +178,7 @@ the whole selected batch explicitly opts into `ParallelSafe`.
 
 ## PR6: Idempotency And Retry Boundary
 
-Do not add automatic Runner retries for tools in the first pass. Define the
-contract first:
+✅ Completed. Delivered the minimal contract without automatic Runner retries:
 
 ```go
 type ExecutionContext struct {
@@ -189,9 +188,17 @@ type ExecutionContext struct {
 }
 ```
 
+The Runner injects this context before every tool's `Run` (and before the
+`BeforeTool` hook) via `tool.ContextWithExecutionContext`; tools read it with
+`tool.ExecutionContextFrom`. `runner.WithRunID` supplies the run ID;
+`SuspendedRun.RunID` restores it on `ResumeApproved` so resumed calls keep the
+same `IdempotencyKey` (loop-semantics I13). `x/replay.ToolRecord.CallID` records
+the per-call identifier on the tape. See
+`docs/superpowers/specs/2026-06-02-idempotency-boundary-design.md`.
+
 Read-only tools can be retried by add-ons. Idempotent writes require the same
 idempotency key. Non-idempotent destructive writes must not be retried
-automatically.
+automatically. No automatic retries are added in core.
 
 ## PR7: Reference Proof
 

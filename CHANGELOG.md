@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-02
+
+### Added
+
+- **Idempotency boundary** — the Runner now injects a run-scoped
+  `tool.ExecutionContext{RunID, ToolCallID, IdempotencyKey}` into the context
+  passed to every tool's `Run` (and to the `BeforeTool` hook), read via
+  `tool.ExecutionContextFrom`. `runner.WithRunID` supplies the run ID; the
+  `IdempotencyKey` is a deterministic function of `(RunID, ToolCallID)` — empty
+  when no `RunID` is set, so behavior is fully backward compatible. The context
+  is an audit and deduplication hint, not a security boundary, and the Runner
+  adds no automatic retries.
+- **`SuspendedRun.RunID`** — suspended runs now carry the run ID so
+  `ResumeApproved` restores it (overriding any `WithRunID` passed on resume),
+  giving approved and previously-allowed calls the same `IdempotencyKey` they
+  would have had in the original run (loop-semantics I13). Fixtures without the
+  field deserialize to `""`.
+- **`x/replay.ToolRecord.CallID`** — `RecordingTool` records the tool_use ID
+  from the execution context, so the execution tape gains per-call correlation
+  (audit and idempotency share one identifier). Legacy fixtures without `callID`
+  still load.
+
 ### Changed
 
 - **Effect-aware concurrency** — `runner.WithMaxConcurrency(n > 1)` now treats
@@ -183,6 +205,7 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
+[0.6.0]: https://github.com/nethinwei/fino/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nethinwei/fino/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nethinwei/fino/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nethinwei/fino/compare/v0.2.1...v0.3.0

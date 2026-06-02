@@ -141,6 +141,10 @@ type Result struct {
 	// resolved to DecisionSuspend), in call order. It is non-empty only when
 	// Suspended is true.
 	PendingCalls []PendingToolCall
+	// runID is the run-scoped identifier (runner.WithRunID), carried so
+	// SuspendedRun can restore it for ResumeApproved. Unexported because callers
+	// read it through SuspendedRun, not off the Result.
+	runID string
 }
 
 // Text returns the text of the final message.
@@ -162,11 +166,18 @@ type runConfig struct {
 	modeName      string
 	modelOpts     []model.Option
 	resumePending bool
+	runID         string
 }
 
 // WithMode selects which mode of the Agent to start the run in. The default is
 // the Agent's default mode.
 func WithMode(name string) RunOption { return func(c *runConfig) { c.modeName = name } }
+
+// WithRunID sets the run-scoped identifier surfaced to tools via
+// tool.ExecutionContext. It is shared by Run, Stream, and ResumeApproved. When
+// omitted, the run ID is empty and the derived IdempotencyKey is also empty,
+// which preserves prior behavior exactly.
+func WithRunID(id string) RunOption { return func(c *runConfig) { c.runID = id } }
 
 // WithModelOptions appends model options applied after the mode's own defaults.
 func WithModelOptions(opts ...model.Option) RunOption {
@@ -248,6 +259,7 @@ func (st *runState) suspendedResult(pending []PendingToolCall) *Result {
 		LastMode:     st.mode.Name,
 		Suspended:    true,
 		PendingCalls: pending,
+		runID:        st.cfg.runID,
 	}
 }
 
@@ -300,9 +312,12 @@ func (r *Runner) authorize(ctx context.Context, st *runState, selected tool.Tool
 }
 
 // execute runs a single authorized tool, firing the BeforeTool and AfterTool
-// hooks around it. It returns the (possibly hook-updated) context so callers
-// can propagate it. It is shared by Run and Stream.
+// hooks around it. It first injects the run-scoped tool.ExecutionContext so
+// both lifecycle hooks and the tool itself can read it (loop-semantics I13). It
+// returns the (possibly hook-updated) context so callers can propagate it. It
+// is shared by Run, Stream, and ResumeApproved.
 func (r *Runner) execute(ctx context.Context, st *runState, selected tool.Tool, call message.ToolUse) (context.Context, tool.Result, error) {
+	ctx = tool.ContextWithExecutionContext(ctx, executionContext(st.cfg.runID, call.ID))
 	ctx = r.beforeTool(ctx, st.agent.Name(), st.mode.Name, selected.Info(), call.Input)
 	out, err := selected.Run(ctx, call.Input)
 	if err != nil {
@@ -310,6 +325,18 @@ func (r *Runner) execute(ctx context.Context, st *runState, selected tool.Tool, 
 	}
 	r.afterTool(ctx, st.agent.Name(), st.mode.Name, selected.Info(), out)
 	return ctx, out, nil
+}
+
+// executionContext builds the per-call tool.ExecutionContext. The
+// IdempotencyKey is a deterministic function of (runID, toolCallID): runID +
+// ":" + toolCallID when runID is non-empty, otherwise empty. The derivation is
+// an implementation detail; tools read IdempotencyKey, they do not build it.
+func executionContext(runID, toolCallID string) tool.ExecutionContext {
+	key := ""
+	if runID != "" {
+		key = runID + ":" + toolCallID
+	}
+	return tool.ExecutionContext{RunID: runID, ToolCallID: toolCallID, IdempotencyKey: key}
 }
 
 // pendingToolUses returns the pending tool calls at the tail of history: the
