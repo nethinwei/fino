@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-03
+
+### Added
+
+- **Coding agent reference proof** — `examples/coding_agent/` demonstrates all
+  fino core mechanisms end-to-end: ReAct loop, dual-mode agent (plan/code),
+  effect-aware policy (suspend on `RequiresApproval`), human-in-the-loop
+  approve/reject, streaming output (plan phase via `Runner.Stream` with live
+  `TextDelta`), and deterministic replay testing. The example is a reference
+  proof, not a product; it lives entirely in `examples/` with no new core or
+  `x/` packages.
+  - `tools.go` — four tool constructors (`read_file`, `list_files`,
+    `write_file`, `run_tests`) with declared `Effects`, an `approvalPolicy`,
+    and a `buildAgent` helper.
+  - `main.go` (`//go:build !record`) — CLI with plan→code loop, recording via
+    `RecordingModel/Tool/Policy`, 5-minute context timeout, trace hooks.
+  - `record_fixture.go` (`//go:build record`) — auto-approve recording script
+    for rebuilding fixtures.
+  - `replay_test.go` — direct Runner replay with `ReplayModel/Tool/Policy`,
+    asserts suspend count matches tape.
+  - `testdata/` — pre-recorded fixture with parallel `read_file` + `write_file`
+    suspend/approve/resume cycle.
+
 ## [0.6.0] - 2026-06-02
 
 ### Added
@@ -205,6 +228,7 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
+[0.7.0]: https://github.com/nethinwei/fino/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/nethinwei/fino/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nethinwei/fino/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nethinwei/fino/compare/v0.3.0...v0.4.0
