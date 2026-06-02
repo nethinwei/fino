@@ -99,11 +99,13 @@ func WithPolicy(p policy.Policy) Option {
 // WithHooks sets the lifecycle hooks observed during a run.
 func WithHooks(h *hooks.Hooks) Option { return func(r *Runner) { r.hooks = h } }
 
-// WithMaxConcurrency sets the maximum number of tools executed concurrently
-// within a single tool-call batch. A value of n <= 1 (the default) keeps tools
-// serial. A value of n > 1 executes up to n tools at once: the Runner still
-// authorizes all calls serially in call order, preserves result order, and is
-// fail-fast on the first error; user tools must be safe for concurrent use.
+// WithMaxConcurrency sets the maximum number of tools the Runner may execute
+// concurrently within a single tool-call batch. A value of n <= 1 (the default)
+// keeps tools serial. A value of n > 1 permits up to n tools at once only when
+// every tool in the batch declares tool.Effects.ParallelSafe; otherwise the
+// whole batch falls back to serial execution. The Runner still authorizes all
+// calls serially in call order, preserves result order, and is fail-fast on the
+// first error.
 func WithMaxConcurrency(n int) Option { return func(r *Runner) { r.maxConcurrency = n } }
 
 // Input is the initial message list for a run. Construct it with Text or
@@ -425,12 +427,9 @@ func (r *Runner) generate(ctx context.Context, st *runState) (context.Context, *
 // ensures that a deny or suspend anywhere in the batch produces no side effects
 // (loop-semantics §4, I6). It returns the suspended pending calls (non-empty
 // only when the batch suspended, in which case nothing executed) so the caller
-// can halt with a suspended Result. When maxConcurrency > 1 and the batch has
-// more than one call, it delegates to runToolCallsParallel.
+// can halt with a suspended Result. When maxConcurrency > 1 and every selected
+// tool declares ParallelSafe, it delegates to the parallel finish path.
 func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, []PendingToolCall, error) {
-	if r.maxConcurrency > 1 && len(calls) > 1 {
-		return r.runToolCallsParallel(ctx, st, calls)
-	}
 	_, toolsByName := collectTools(st.mode.Tools)
 	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
 	if err != nil {
@@ -439,6 +438,9 @@ func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message
 	}
 	if len(pending) > 0 {
 		return ctx, pending, nil
+	}
+	if r.shouldRunBatchParallel(selected) {
+		return r.finishToolCallsParallel(ctx, st, selected, calls)
 	}
 	ctx, blocks, err := r.executeBatchSerial(ctx, st, selected, calls)
 	if err != nil {
@@ -509,6 +511,18 @@ func (r *Runner) authorizeBatch(ctx context.Context, st *runState, toolsByName m
 // external (parent ctx) cancellation.
 var errSiblingFailed = errors.New("runner: sibling tool failed")
 
+func (r *Runner) shouldRunBatchParallel(selected []tool.Tool) bool {
+	if r.maxConcurrency <= 1 || len(selected) <= 1 {
+		return false
+	}
+	for _, t := range selected {
+		if t == nil || !t.Info().Effects.ParallelSafe {
+			return false
+		}
+	}
+	return true
+}
+
 // toolOutcome is the result of one parallel tool execution, kept at its call
 // index so results stay in call order regardless of completion order.
 // inducedCancel marks a context.Canceled that was caused by the batch's own
@@ -521,20 +535,11 @@ type toolOutcome struct {
 	inducedCancel bool
 }
 
-// runToolCallsParallel authorizes all calls serially, executes the authorized
-// tools concurrently (bounded by maxConcurrency), appends one RoleTool message
-// with results in call order, and applies handoffs in call order. The first
-// error by call order cancels siblings and is returned.
-func (r *Runner) runToolCallsParallel(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, []PendingToolCall, error) {
-	_, toolsByName := collectTools(st.mode.Tools)
-	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
-	if err != nil {
-		r.onError(ctx, err)
-		return ctx, nil, err
-	}
-	if len(pending) > 0 {
-		return ctx, pending, nil
-	}
+// finishToolCallsParallel executes an already-authorized, ParallelSafe batch
+// concurrently (bounded by maxConcurrency), appends one RoleTool message with
+// results in call order, and applies handoffs in call order. The first error by
+// call order cancels siblings and is returned.
+func (r *Runner) finishToolCallsParallel(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse) (context.Context, []PendingToolCall, error) {
 	outcomes := r.executeParallel(ctx, st, selected, calls)
 	if err := r.firstBatchError(ctx, outcomes); err != nil {
 		r.onError(ctx, err)

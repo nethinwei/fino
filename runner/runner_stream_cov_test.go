@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nethinwei/fino/agent"
@@ -12,19 +13,57 @@ import (
 	"github.com/nethinwei/fino/tool"
 )
 
+// TestStreamSerialBatchAuthorizedBeforeExecute pins that the serial stream path
+// authorizes the whole batch before running any tool: when a later call in the
+// batch is denied, no earlier tool executes and no ToolCall event is emitted.
+func TestStreamSerialBatchAuthorizedBeforeExecute(t *testing.T) {
+	var t0ran int32
+	t0 := countingTool(t, "t0", &t0ran)
+	t1 := echoTool(t, "t1")
+	m := &streamOnlyModel{turns: [][]model.Event{
+		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
+	}}
+	// Default maxConcurrency keeps the batch serial; deny only the second call.
+	r, err := New(m, WithPolicy(&kindPolicy{deny: map[string]bool{"t1": true}}))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+	var gotErr error
+	var sawToolCall bool
+	for ev, err := range r.Stream(context.Background(), testAgent(t, t0, t1), Text("hi")) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+		if _, ok := ev.(model.ToolCall); ok {
+			sawToolCall = true
+		}
+	}
+	var tde *ToolDeniedError
+	if !errors.As(gotErr, &tde) {
+		t.Fatalf("error = %v, want ToolDeniedError", gotErr)
+	}
+	if sawToolCall {
+		t.Error("ToolCall emitted before a batch-level deny; serial Stream must authorize the whole batch first")
+	}
+	if n := atomic.LoadInt32(&t0ran); n != 0 {
+		t.Errorf("t0 executed %d times; a denied batch must execute no tool", n)
+	}
+}
+
 func echoTool(t *testing.T, name string) tool.Tool {
 	t.Helper()
 	tl, err := tool.NewFunc(name, "echo", func(ctx context.Context, in echoInput) (string, error) {
 		return name, nil
-	})
+	}, tool.WithEffects(parallelSafeEffects))
 	if err != nil {
 		t.Fatalf("NewFunc error: %v", err)
 	}
 	return tl
 }
 
-// TestStreamParallelPolicyDenial covers the authorizeBatch error path in the
-// parallel streaming branch (streamToolCallsParallel).
+// TestStreamParallelPolicyDenial covers the authorizeBatch error path before
+// Stream selects either the serial or parallel execution branch.
 func TestStreamParallelPolicyDenial(t *testing.T) {
 	m := &streamOnlyModel{turns: [][]model.Event{
 		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
@@ -47,12 +86,12 @@ func TestStreamParallelPolicyDenial(t *testing.T) {
 }
 
 // TestStreamParallelToolError covers the per-result error branch in
-// drainToolResults and the error reporting in streamToolCallsParallel.
+// drainToolResults and the error reporting in finishStreamToolCallsParallel.
 func TestStreamParallelToolError(t *testing.T) {
 	boom := errors.New("boom")
 	failing, _ := tool.NewFunc("t0", "fail", func(ctx context.Context, in echoInput) (string, error) {
 		return "", boom
-	})
+	}, tool.WithEffects(parallelSafeEffects))
 	m := &streamOnlyModel{turns: [][]model.Event{
 		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
 	}}
@@ -78,6 +117,7 @@ func TestStreamParallelHandoff(t *testing.T) {
 	targetMode, _ := agent.NewMode("default", "target")
 	target, _ := agent.New("target", agent.WithMode(targetMode), agent.WithDefaultMode("default"))
 	handoff, _ := agent.NewHandoffTool(target)
+	handoff = parallelSafeHandoff(t, handoff)
 	srcMode, _ := agent.NewMode("default", "source", agent.WithTools(echoTool(t, "echo"), handoff))
 	source, _ := agent.New("source", agent.WithMode(srcMode), agent.WithDefaultMode("default"))
 
@@ -106,8 +146,8 @@ func TestStreamParallelHandoff(t *testing.T) {
 	}
 }
 
-// TestStreamSerialToolError covers the execute-error branch in
-// handleStreamToolCall (single tool call uses the serial path).
+// TestStreamSerialToolError covers the execute-error branch in the serial stream
+// execution path (single tool call uses the serial path).
 func TestStreamSerialToolError(t *testing.T) {
 	boom := errors.New("boom")
 	failing, _ := tool.NewFunc("echo", "fail", func(ctx context.Context, in echoInput) (string, error) {

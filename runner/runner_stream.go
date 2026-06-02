@@ -140,76 +140,61 @@ func (r *Runner) streamGenerate(ctx context.Context, st *runState, yield func(mo
 	return ctx, finalMsg, true
 }
 
-// streamToolCalls authorizes and executes each requested tool serially,
-// emitting ToolCall/ToolResult/Handoff events, then appends a single RoleTool
-// message with all results. The bool result is false when iteration should
-// stop. When maxConcurrency > 1 and the batch has more than one call, it
-// delegates to streamToolCallsParallel.
+// streamToolCalls authorizes the whole batch first, then executes it serially or
+// in parallel depending on the batch's ParallelSafe declarations. It emits
+// ToolCall/ToolResult/Handoff events, then appends a single RoleTool message
+// with all results. The bool result is false when iteration should stop.
 func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
-	if r.maxConcurrency > 1 && len(calls) > 1 {
-		return r.streamToolCallsParallel(ctx, st, calls, yield)
-	}
 	_, toolsByName := collectTools(st.mode.Tools)
+	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
+	if err != nil {
+		r.emitErr(ctx, yield, err)
+		return ctx, false
+	}
+	// Stream has no suspended Result path, so it downgrades suspend to deny:
+	// report the first suspended call as a ToolDeniedError. Because the whole
+	// batch is authorized before any tool runs, a suspend (like a deny) executes
+	// nothing and emits no ToolCall event. PR2 has no suspended stream event.
+	if len(pending) > 0 {
+		pc := pending[0]
+		r.emitErr(ctx, yield, &ToolDeniedError{
+			Tool:     pc.Tool,
+			Decision: policy.Decision{Kind: policy.DecisionSuspend, Reason: pc.Reason},
+		})
+		return ctx, false
+	}
+	if r.shouldRunBatchParallel(selected) {
+		return r.finishStreamToolCallsParallel(ctx, st, selected, calls, yield)
+	}
+	return r.streamToolCallsSerialAuthorized(ctx, st, selected, calls, yield)
+}
+
+func (r *Runner) streamToolCallsSerialAuthorized(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
 	blocks := make([]message.Block, 0, len(calls))
-	selected := make([]tool.Tool, 0, len(calls))
-	for _, call := range calls {
+	for i, call := range calls {
 		if err := ctx.Err(); err != nil {
 			r.emitErr(ctx, yield, err)
 			return ctx, false
 		}
-		newCtx, block, sel, ok := r.handleStreamToolCall(ctx, st, toolsByName, call, yield)
-		if !ok {
+		if !yield(model.ToolCall{Call: call}, nil) {
+			return ctx, false
+		}
+		newCtx, out, err := r.execute(ctx, st, selected[i], call)
+		if err != nil {
+			r.emitErr(ctx, yield, err)
 			return ctx, false
 		}
 		ctx = newCtx
-		blocks = append(blocks, block)
-		selected = append(selected, sel)
+		if !yield(model.ToolResult{CallID: call.ID, Name: call.Name, Result: out}, nil) {
+			return ctx, false
+		}
+		blocks = append(blocks, message.NewToolResult(call.ID, call.Name, out.Content, out.IsError))
 	}
-	// Handoffs apply at batch end (in call order), matching the parallel path
-	// and the non-streaming Run path; Handoff events are emitted after the batch.
 	if ctx, ok := r.emitHandoffs(ctx, st, selected, yield); !ok {
 		return ctx, false
 	}
 	st.history = append(st.history, message.ToolResults(blocks...))
 	return ctx, true
-}
-
-// handleStreamToolCall resolves, authorizes, and executes one tool call,
-// emitting ToolCall and ToolResult events around execution and returning the
-// tool_result block and the selected tool. Handoffs are deferred to batch end
-// by the caller via emitHandoffs.
-func (r *Runner) handleStreamToolCall(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, call message.ToolUse, yield func(model.Event, error) bool) (context.Context, message.Block, tool.Tool, bool) {
-	selected, ok := toolsByName[call.Name]
-	if !ok {
-		r.emitErr(ctx, yield, fmt.Errorf("%w: %q", ErrToolNotFound, call.Name))
-		return ctx, message.Block{}, nil, false
-	}
-	decision, err := r.authorize(ctx, st, selected, call)
-	if err != nil {
-		r.emitErr(ctx, yield, err)
-		return ctx, message.Block{}, nil, false
-	}
-	// Stream has no suspended Result path (it returns iter.Seq2[Event, error]
-	// with no Result), and FinalMessage is reserved for the no-tool-call turn.
-	// PR2 downgrades suspend to a deny error in Stream; full suspend semantics
-	// live on Run. See the PR2 design and loop-semantics §5.
-	if decision.ResolvedKind() == policy.DecisionSuspend {
-		r.emitErr(ctx, yield, &ToolDeniedError{Tool: selected.Info(), Decision: decision})
-		return ctx, message.Block{}, nil, false
-	}
-	if !yield(model.ToolCall{Call: call}, nil) {
-		return ctx, message.Block{}, nil, false
-	}
-	ctx, out, err := r.execute(ctx, st, selected, call)
-	if err != nil {
-		r.emitErr(ctx, yield, err)
-		return ctx, message.Block{}, nil, false
-	}
-	if !yield(model.ToolResult{CallID: call.ID, Name: call.Name, Result: out}, nil) {
-		return ctx, message.Block{}, nil, false
-	}
-	block := message.NewToolResult(call.ID, call.Name, out.Content, out.IsError)
-	return ctx, block, selected, true
 }
 
 // emitHandoffs applies every handoff tool in the batch in call order (last
@@ -243,28 +228,13 @@ type streamResult struct {
 	inducedCancel bool
 }
 
-// streamToolCallsParallel authorizes all calls serially, emits every ToolCall
-// event in call order, executes the tools concurrently, and emits ToolResult
-// events in completion order. All yields happen on this single goroutine, so
-// the iterator stays safe. After execution it reports the first error by call
-// order, otherwise applies handoffs and appends the batched RoleTool message.
-func (r *Runner) streamToolCallsParallel(ctx context.Context, st *runState, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
-	_, toolsByName := collectTools(st.mode.Tools)
-	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
-	if err != nil {
-		r.emitErr(ctx, yield, err)
-		return ctx, false
-	}
-	// Stream downgrades suspend to deny (see handleStreamToolCall): report the
-	// first suspended call as a ToolDeniedError. PR2 has no suspended stream event.
-	if len(pending) > 0 {
-		pc := pending[0]
-		r.emitErr(ctx, yield, &ToolDeniedError{
-			Tool:     pc.Tool,
-			Decision: policy.Decision{Kind: policy.DecisionSuspend, Reason: pc.Reason},
-		})
-		return ctx, false
-	}
+// finishStreamToolCallsParallel emits every ToolCall event in call order,
+// executes an already-authorized, ParallelSafe batch concurrently, and emits
+// ToolResult events in completion order. All yields happen on this single
+// goroutine, so the iterator stays safe. After execution it reports the first
+// error by call order, otherwise applies handoffs and appends the batched
+// RoleTool message.
+func (r *Runner) finishStreamToolCallsParallel(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
 	for _, call := range calls {
 		if !yield(model.ToolCall{Call: call}, nil) {
 			return ctx, false

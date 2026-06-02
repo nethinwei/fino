@@ -139,7 +139,10 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 
 > 行为收紧：旧串行实现是逐调用 `authorize→execute`，靠后调用被 Deny 前靠前调用已产生副作用。改为整批先授权后，`call₁=Allow + call₂=Deny` 时 call₁ 不再执行——这使串/并行在 fail-fast 下真正等价（I6），符合“批内任一被拒则全批无副作用”的网关语义。
 
-### 4.2 并行策略（maxConcurrency = k > 1 且 n > 1）
+### 4.2 并行策略（maxConcurrency = k > 1、n > 1，且全部工具声明 ParallelSafe）
+
+并行执行只适用于批内每个 selected tool 的 `tool.Info().Effects.ParallelSafe == true`。
+若任一工具未声明 `ParallelSafe`，整个批次按 §4.1 串行策略执行；不做批内分区。
 
 ```text
 1. authorizeBatch: 按调用序串行完成所有 resolve + authorize（不执行用户代码）。
@@ -152,7 +155,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 6. ctx 作用域: BeforeTool 返回的 ctx 只作用于该工具自身的 Run 与 AfterTool，不线性串接到下一次模型调用。
 ```
 
-两种策略对外部可观察输出（追加的 `RoleTool` 消息、返回的错误、最终 `State`、事件序列）必须等价。差异仅限于 §4.1/§4.2 中显式声明的 ctx 作用域语义。
+两种策略对 Runner 协议结果（追加的 `RoleTool` 消息、返回的错误、最终 `State`）必须等价。差异仅限于 §4.1/§4.2 中显式声明的 ctx 作用域语义，以及 §5 中明确规定的 Stream 并行 `ToolResult` 完成序事件。
 
 ## 5. 流式（Stream）附加规则
 
@@ -167,6 +170,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 - 转发 model.Stream 的语义事件（ContentBlockStart/Delta/Stop、TextDelta）；每个 turn 的 TurnMessage 也按 turn 转发，
   使含工具调用的中间 turn 的完整 assistant 快照可观测、可重放。
 - 仅在收到当前 turn 的 TurnMessage 后解析 toolUses 并执行工具。
+- 整批先授权: 串行与并行 Stream 都先按 §4 对整批 resolve+authorize，再执行任一工具。批内任一被 Deny/Suspend 则全批无副作用、不发任何 ToolCall 事件（与 Run 一致，符合 §4.1/I6）。
 - Suspend 降级: Stream 没有 suspended Result 出口（返回 iter.Seq2[Event, error]），且 FinalMessage 只用于无工具调用的终态 turn。
   故 Stream 将 DecisionSuspend 降级为 ToolDeniedError（运行期终止错误），不引入新事件类型。完整 suspend 语义仅在 Run。
 - 每个工具调用前发 ToolCall，调用后发 ToolResult；handoff 在批次结束后发 Handoff。
@@ -212,7 +216,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 | I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1；挂起（非错误）不触发 OnError |
 | I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `ResolvedKind = Allow` |
 | I11 | 挂起精确性 | `[T-SUSPEND]` 后 `PendingCalls` 恰好等于该批 `ResolvedKind = Suspend` 的调用（按调用序）；被 Allow 但未执行的调用不计入，且该批不追加任何 `RoleTool` 消息 |
-| I6 | 协议轨迹等价 | 在工具独立、或后续声明为可安全并行的前提下，并行执行产生与串行相同的 Runner 协议轨迹（结果顺序、首错选择、终止形态） |
+| I6 | 协议轨迹等价 | 对通过显式 `ParallelSafe` gate 的批次，并行执行产生与串行相同的 Runner 协议轨迹（结果顺序、首错选择、终止形态）；未通过 gate 的批次退回串行 |
 | I7 | handoff 末位 | 同批含 handoff `[h_j … h_m]` 时，终态 `agent` == `h_m.TargetAgent()` |
 | I8 | 无系统泄漏 | ∀ 时刻，`∀ msg ∈ history: msg.Role ≠ system` |
 | I9 | ctx 忠实 | `ctx` 取消后不再发生新的 `model.Generate`/`model.Stream` 或 `tool.Run` |
@@ -221,7 +225,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 
 ### 7.1 关于 I6（协议轨迹等价）与诱导取消
 
-I6 当前只承诺 Runner 可观察的协议轨迹等价：工具结果按调用序写回、首错按调用序选择、终止错误路径一致。它不承诺任意外部世界状态在并行与串行之间等价；该性质需要工具彼此独立，或在未来通过 `tool.Effects.ParallelSafe` 明确声明。
+I6 当前只承诺 Runner 可观察的协议轨迹等价：工具结果按调用序写回、首错按调用序选择、终止错误路径一致。它不承诺任意外部世界状态在并行与串行之间等价；该性质需要工具作者通过 `tool.Effects.ParallelSafe` 明确声明。Runner 在 PR5 实现该前置条件：只有全批工具显式声明 `ParallelSafe` 时才进入并行求值。未声明或混合批次退回串行，因此 zero-value `Effects` 保持保守。
 
 诱导取消的判定（`isInducedCancel`）：错误是 `context.Canceled`、父 `ctx` 未取消、且 batch ctx 的 cause 为 `errSiblingFailed`。这意味着 **`context.Canceled` 被解释为“工具观测到取消”而非领域错误**。在此契约下 I6 对所有不把 `context.Canceled` 当作领域返回值的工具成立。
 
