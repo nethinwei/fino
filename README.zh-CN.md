@@ -282,6 +282,8 @@ fino 的命题是：**可靠的复杂 Agent 能力不需要框架，只需要正
 
 API 风格是统一的（`NewX(required, opts ...Option) (*X, error)`），整体在往稳定走，但打出 `v1` tag 之前还可能改。要保证可复现，先 pin 到某个 commit。
 
+后续 typed tool effects、暂停/恢复、execution tape 和 effect-aware concurrency 的演进路径见 [`docs/roadmap.md`](docs/roadmap.md)。
+
 ## 参与进来
 
 欢迎提 Issue 和 PR。动核心包之前，先扫一眼 [`CONTRIBUTING.md`](CONTRIBUTING.md)（编码规范：Google Go Style、`gofmt`、TDD、核心不引外部依赖）和 [`docs/design.md`](docs/design.md)（设计边界）。
