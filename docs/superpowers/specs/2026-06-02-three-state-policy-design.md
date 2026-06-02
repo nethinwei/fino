@@ -73,7 +73,9 @@ PR3 will add `InputHash string` for approval binding. PR2 does not need it — t
 
 ### D4: Batch suspend semantics — first implementation
 
-When any call in a tool batch is suspended, the entire batch is suspended and no tool in that batch executes.
+When any call in a tool batch is suspended, the entire batch is suspended and no tool in that batch executes. `PendingCalls` contains **only** the calls whose `ResolvedKind() == DecisionSuspend`; calls that were allowed but not executed (due to the batch suspend) are not included.
+
+**Mixed Allow + Suspend batches**: When call₁ = Allow and call₂ = Suspend, the batch suspends. call₁ is not executed and does not appear in `PendingCalls`. The history ends with the assistant message containing both `tool_use` blocks (allow and suspend alike), with no following `tool_result` message. PR3's `ResumeApproved` must handle this by re-executing all pending calls (both previously-allowed and previously-suspended) after approval, since none produced results. This is the "no batch partitioning" trade-off acknowledged in Out of Scope.
 
 **Rationale**: This is the conservative first version. It avoids partial execution and the question of "which tools ran before the suspend?" The caller sees all pending calls in the batch and can approve them together in PR3.
 
@@ -88,11 +90,12 @@ for each call: resolve → authorize → execute
 
 New flow:
 ```
-1. resolve + authorize all calls (serial, in call order)
+1. authorizeBatch: resolve + authorize all calls (serial, in call order)
    - if any call not found → ErrToolNotFound (fail-fast, no change)
-   - if any call denied → ToolDeniedError (fail-fast, no change)
-   - if any call suspended → halt to Suspended Result (new)
-2. execute all authorized calls (serial or parallel, no change)
+   - if any call denied → ToolDeniedError (fail-fast, no change; does NOT continue to authorize remaining calls)
+   - if any call suspended → collect into pending list (authorize continues for remaining calls to check for denies)
+2. suspend check: if pending list non-empty → [T-SUSPEND] halt (no tools execute)
+3. execute all authorized calls (serial or parallel, no change)
 ```
 
 This is a structural change only for the serial path. The parallel path already separates authorize and execute phases.
@@ -155,24 +158,25 @@ Same suspend logic as `Run`: yield a `FinalMessage` event with the suspended Res
 
 ```text
 [T-TOOLS]    pre: immediately after [T-MODEL] and toolUses(msg) = [c₁ … cₙ], n ≥ 1
-             step 1 — authorizeBatch:
-               For each cᵢ in call order: resolve → authorize
-               - resolve failure ⟶ halt(wrap(ErrToolNotFound, name))
-               - ResolvedKind() == DecisionDeny ⟶ halt(ToolDeniedError{Tool, Decision})
-               - ResolvedKind() == DecisionSuspend ⟶ collect into pending list
-             step 2 — suspend check:
-               If pending list non-empty ⟶ [T-SUSPEND]
-             step 3 — executeBatch:
-               Execute all calls (serial or parallel per maxConcurrency)
-               Append single RoleTool message
-               Apply handoffs (last wins)
+              step 1 — authorizeBatch:
+                For each cᵢ in call order: resolve → authorize
+                - resolve failure ⟶ halt(wrap(ErrToolNotFound, name))
+                - ResolvedKind() == DecisionDeny ⟶ halt(ToolDeniedError{Tool, Decision})
+                - ResolvedKind() == DecisionSuspend ⟶ collect into pending list, continue to next call
+                (suspend does not short-circuit; authorize continues so deny can take precedence)
+              step 2 — suspend check:
+                If pending list non-empty ⟶ [T-SUSPEND]
+              step 3 — executeBatch:
+                Execute all calls (serial or parallel per maxConcurrency)
+                Append single RoleTool message
+                Apply handoffs (last wins)
 
 [T-SUSPEND]  pre: authorizeBatch found ≥1 suspended calls, no denies
-             action: none (no tools execute)
+             action: none (no tools execute; allowed-but-not-executed calls are also not in PendingCalls)
              result: halt(Result{
                        Suspended: true,
-                       PendingCalls: [{Tool, Call, Reason} for each suspended call],
-                       Messages: history (includes the dangling assistant with tool_uses),
+                       PendingCalls: [{Tool, Call, Reason} for each suspended call only],
+                       Messages: history (includes the dangling assistant with all tool_uses),
                        LastAgent: agent,
                        LastMode: mode.Name,
                      })
@@ -209,4 +213,6 @@ Same suspend logic as `Run`: yield a `FinalMessage` event with the suspended Res
 8. **Integration: deny takes precedence over suspend** — Mixed deny + suspend in same batch → `ToolDeniedError`, no suspend.
 9. **Integration: suspended Result has correct history** — `Result.Messages` ends with the assistant message containing the `tool_use` blocks.
 10. **Integration: parallel path suspend** — `authorizeBatch` in parallel path also suspends on `DecisionSuspend`.
-11. **Property: I3 updated** — `Run` output ∈ {Completed Result, Suspended Result, error}, mutually exclusive.
+11. **Integration: Allow + Suspend mixed batch** — Batch with call₁=Allow, call₂=Suspend → `Result{Suspended: true}`, `PendingCalls` contains only call₂, `Result.Messages` ends with assistant message containing both `tool_use` blocks, no `tool_result` follows.
+12. **Integration: deny fail-fast after refactor** — call₁=Deny → `authorizeBatch` returns `ToolDeniedError`; call₂ is never resolved or authorized (Policy.Authorize not called for call₂). This verifies the serial-to-batch refactor preserves deny fail-fast.
+13. **Property: I3 updated** — `Run` output ∈ {Completed Result, Suspended Result, error}, mutually exclusive.
