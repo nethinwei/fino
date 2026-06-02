@@ -270,11 +270,13 @@ fino 的命题是：**复杂工具型 Agent 的可靠执行基础设施，不需
 
 | Add-on | 难题 | 依赖的接缝 |
 | --- | --- | --- |
-| [`x/replay`](x/replay) | 可复现与调试 | 记录当前的模型/工具效应；Policy 决策和会影响行为的拦截器尚未进入完整 execution tape |
+| [`x/replay`](x/replay) | 可复现与审计 | 在公共接缝上记录 execution tape——模型响应、Policy 决策、工具执行、suspend、approval、resume 与终止；重放时不调用真实 provider、工具或 Policy |
 | [`x/recover`](x/recover) | 崩溃恢复与续跑 | 安全边界续跑（`history + mode`）及盲恢复的 opt-in pending-tool 接缝；HITL 审批恢复由 `runner.ResumeApproved` 承载，不经 `x/recover` |
 | [`x/trace`](x/trace) | tracing 与可观测性 | `hooks.Hooks` 的确定触发顺序 |
 | [`x/budget`](x/budget) | 成本 / token 预算 | `model.Model` 装饰器 |
-| [`x/eval`](x/eval) | 可复现回归测试 | 当前基于已记录的模型/工具效应；未来 execution tape 会补齐 policy/suspend 边界 |
+| [`x/eval`](x/eval) | 可复现回归测试 | 在已记录的 tape 上跑确定性用例；`RunWithOptions` 可为依赖 Policy 的 fixture 接入 `ReplayPolicy` |
+
+replay tape 是可复现性与审计证据，不证明业务正确性；它不提供 exactly-once 副作用、durable workflow 或防篡改能力。
 
 核心永远不为“增加能力”而改，只在确有必要时为“暴露缺失接缝”而改。详见 [`docs/design.md`](docs/design.md) 的**接缝纪律**。
 
@@ -282,7 +284,7 @@ fino 的命题是：**复杂工具型 Agent 的可靠执行基础设施，不需
 
 API 风格是统一的（`NewX(required, opts ...Option) (*X, error)`），整体在往稳定走，但打出 `v1` tag 之前还可能改。要保证可复现，先 pin 到某个 commit。
 
-后续 typed tool effects、暂停/恢复、execution tape 和 effect-aware concurrency 的演进路径见 [`docs/roadmap.md`](docs/roadmap.md)。
+后续 effect-aware concurrency 与幂等边界的演进路径见 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 参与进来
 
