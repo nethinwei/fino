@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Tightened reliability claims around replay, recovery, and parallel execution:
+  current guarantees are scoped to recorded model/tool effects, safe-boundary
+  continuation, and protocol-trace equivalence under tool-independence
+  assumptions. Full effect-aware approval/resume and execution-tape semantics
+  are tracked in the roadmap rather than claimed as shipped behavior.
+
 ## [0.2.0] - 2026-06-02
 
 ### Added
@@ -12,8 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loop as a state-transition system with ten invariants (I1–I10).
 - **Property-based invariant tests** — `runner/invariants_test.go` verifies
   nine of the ten invariants (I1–I9) over many random scripts at both serial and
-  parallel concurrency, including serial/parallel equivalence; the tenth (I10,
-  resume-completeness) is covered separately by a seam probe
+  parallel concurrency, including protocol-trace equivalence under
+  tool-independence assumptions; the tenth (I10, safe-boundary continuation) is
+  covered separately by a seam probe
   (`runner/recover_seam_test.go`).
 - **`x/` reference compositions** — `x/replay`, `x/recover`, `x/trace`,
   `x/budget`, and `x/eval`: constructive evidence that the core's seams suffice,

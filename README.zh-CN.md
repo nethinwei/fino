@@ -262,19 +262,19 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/streaming
 
 ## 充分性：不靠框架也能解决难题
 
-fino 的命题是：**可靠的复杂 Agent 能力不需要框架，只需要正确的最小原语、精确语义和组合。** 这个命题是可被检验的，而不只是口号：
+fino 的命题是：**复杂工具型 Agent 的可靠执行基础设施，不需要侵入应用的大型框架；它需要语义充分的运行时内核、显式副作用边界和可组合策略。** 这个命题是可被检验的，而不只是口号。
 
-- **精确语义**——ReAct 循环在 [`docs/spec/loop-semantics.md`](docs/spec/loop-semantics.md) 里被定义成一个状态转移系统，配 10 条不变量（结果有序、单条工具消息、OnError 恰好一次、并行/串行等价……）。
-- **是证明，不只是测试**——其中九条由 property-based 测试在串行与并行两种并发下、对上千个随机脚本验证（`runner/invariants_test.go`）；第十条（续跑完备）由专门的接缝探针覆盖（`runner/recover_seam_test.go`）。
-- **构造性证据**——[`x/`](x/) 下的包在核心之外解决了领域里的难题，每个都只是对既有接缝的薄组合：
+- **精确语义**——ReAct 循环在 [`docs/spec/loop-semantics.md`](docs/spec/loop-semantics.md) 里被定义成状态转移系统，覆盖结果有序、单条工具消息、终止错误、流式契约和安全边界续跑等不变量。
+- **是证明，不只是测试**——当前 property-based 测试覆盖串行与并行运行的协议轨迹。并行声明限定为“在工具独立性假设下的协议轨迹等价”，不承诺任意外部状态等价。
+- **构造性证据**——[`x/`](x/) 下的包展示了 replay、recover、trace、budget、eval 如何由既有接缝组合出来，同时明确哪些边界仍需要未来的 effect-aware 运行时契约补齐。
 
 | Add-on | 难题 | 依赖的接缝 |
 | --- | --- | --- |
-| [`x/replay`](x/replay) | 可复现与调试 | `model.Model` + `tool.Tool` 是唯一外部效应入口 |
-| [`x/recover`](x/recover) | 崩溃恢复与续跑 | “续跑完备”不变量（只序列化 history + mode） |
+| [`x/replay`](x/replay) | 可复现与调试 | 记录当前的模型/工具效应；Policy 决策和会影响行为的拦截器尚未进入完整 execution tape |
+| [`x/recover`](x/recover) | 崩溃恢复与续跑 | 安全边界续跑（`history + mode`），外加当前 HITL 示例使用的 opt-in pending-tool 接缝 |
 | [`x/trace`](x/trace) | tracing 与可观测性 | `hooks.Hooks` 的确定触发顺序 |
 | [`x/budget`](x/budget) | 成本 / token 预算 | `model.Model` 装饰器 |
-| [`x/eval`](x/eval) | 可复现回归测试 | `x/replay` 的直接推论 |
+| [`x/eval`](x/eval) | 可复现回归测试 | 当前基于已记录的模型/工具效应；未来 execution tape 会补齐 policy/suspend 边界 |
 
 核心永远不为“增加能力”而改，只在确有必要时为“暴露缺失接缝”而改。详见 [`docs/design.md`](docs/design.md) 的**接缝纪律**。
 

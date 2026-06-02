@@ -262,19 +262,19 @@ Each of these is better expressed in your code, an example, or an add-on package
 
 ## Sufficiency: hard problems without a framework
 
-fino's thesis is that **reliable complex agent capability needs no framework — only correct minimal primitives, precise semantics, and composition.** That claim is made checkable, not just asserted:
+fino's thesis is that **reliable execution infrastructure for complex tool-using agents does not require an application-owning framework; it requires a semantically sufficient runtime kernel, explicit effect boundaries, and composable policies.** That claim is made checkable, not just asserted:
 
-- **Precise semantics** — the ReAct loop is specified as a state-transition system in [`docs/spec/loop-semantics.md`](docs/spec/loop-semantics.md), with ten invariants (ordered results, single tool message, OnError-exactly-once, parallel/serial equivalence, …).
-- **Verified, not just tested** — nine of the ten are checked by property-based tests over a thousand-plus random scripts at both serial and parallel concurrency (`runner/invariants_test.go`); the tenth (resume-completeness) is covered by a dedicated seam probe (`runner/recover_seam_test.go`).
-- **Constructive evidence** — the [`x/`](x/) packages solve the field's hard problems entirely outside the core, each as a thin composition over the existing seams:
+- **Precise semantics** — the ReAct loop is specified as a state-transition system in [`docs/spec/loop-semantics.md`](docs/spec/loop-semantics.md), with invariants for ordered results, single tool messages, terminal errors, stream contracts, and safe-boundary continuation.
+- **Verified, not just tested** — current property tests cover the protocol trace of serial and parallel runs. Parallel claims are scoped to protocol-trace equivalence under tool-independence assumptions, not arbitrary external-state equivalence.
+- **Constructive evidence** — the [`x/`](x/) packages demonstrate replay, recovery, tracing, budgets, and eval as compositions over existing seams, while documenting where future effect-aware runtime contracts are still required.
 
 | Add-on | Problem | Seam it rides on |
 | --- | --- | --- |
-| [`x/replay`](x/replay) | Reproducibility & debugging | `model.Model` + `tool.Tool` are the only effect inputs |
-| [`x/recover`](x/recover) | Crash recovery & durable continuation | the *resume-completeness* invariant (serialize only history + mode) |
+| [`x/replay`](x/replay) | Reproducibility & debugging | records current model/tool effects; policy decisions and behavior-affecting interceptors are not yet part of a full execution tape |
+| [`x/recover`](x/recover) | Crash recovery & durable continuation | safe-boundary continuation (`history + mode`) plus an opt-in pending-tool seam for current HITL examples |
 | [`x/trace`](x/trace) | Tracing & observability | deterministic `hooks.Hooks` firing |
 | [`x/budget`](x/budget) | Cost / token budgets | a `model.Model` decorator |
-| [`x/eval`](x/eval) | Reproducible regression testing | a corollary of `x/replay` |
+| [`x/eval`](x/eval) | Reproducible regression testing | currently built on recorded model/tool effects; future execution tapes will close the policy/suspend boundary |
 
 The core never changes to add a capability — only, if ever, to expose a missing seam. See the **seam discipline** in [`docs/design.md`](docs/design.md).
 
