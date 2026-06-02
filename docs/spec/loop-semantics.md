@@ -57,6 +57,9 @@ State = (agent, mode, history, turn)
                                LastAgent: agent, LastMode: mode.Name})
 
 [T-TOOLS]    前置: 紧接 [T-MODEL] 之后且 toolUses(msg) = [c₁ … cₙ], n ≥ 1
+             步骤0 ID 校验: 每个 cᵢ.ID 非空且批内唯一（在任何 resolve/authorize/execute 之前；批次无副作用）
+                   - 空 ID            ⟶ OnError; halt(wrap(ErrInvalidToolCallID, name))
+                   - 批内重复 ID      ⟶ OnError; halt(wrap(ErrDuplicateToolCallID, id))
              步骤1 authorizeBatch: 按调用序对每个 cᵢ 做 resolve + authorize（不执行任何工具）
                    - resolve 失败              ⟶ OnError; halt(wrap(ErrToolNotFound, name))
                    - ResolvedKind = Deny       ⟶ OnError; halt(ToolDeniedError{Tool, Decision})（fail-fast）
@@ -91,6 +94,8 @@ State = (agent, mode, history, turn)
              步骤1 校验 SuspendedRun + approvals:
                    - suspended.Messages 不含 system message（否则 ErrSystemMessageInHistory，护 I8）
                    - suspended.Messages 末尾须为含 ≥1 个 tool_use 的 dangling assistant
+                   - 该 dangling 批每个 tool_use.ID 非空且批内唯一（否则 wrap(ErrInvalidToolCallID/ErrDuplicateToolCallID)；
+                     与原批 authorizeBatch 步骤0 同一不变量，护 I14）
                    - PendingCalls 非空（空 pending 会退化为无审批盲恢复，拒绝）
                    - 每个 PendingCall.Call.ID 须出现在该批 tool_use 中，且不重复
                    - approvals 对每个 PendingCall 恰好一个，无未知 CallID、无重复
@@ -189,13 +194,15 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
 ## 6. 错误分类
 
 ```text
-运行期终止错误（进入 ReAct 循环后）: 模型调用失败、ErrToolNotFound、Policy 拒绝(ToolDeniedError)、
+运行期终止错误（进入 ReAct 循环后）: 模型调用失败、ErrInvalidToolCallID/ErrDuplicateToolCallID（[T-TOOLS] 步骤0）、
+                                    ErrToolNotFound、Policy 拒绝(ToolDeniedError)、
                                     Policy 系统故障、工具执行错误、ctx 取消、ErrMaxTurns、
                                     ErrStreamContract（仅 Stream：model.Stream 违反事件契约）。
                                     ⟶ 触发 OnError 恰好一次。
 
 构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、所选 mode 不存在；
-                                    ResumeApproved 的 ErrResumeAgentMismatch、ErrSystemMessageInHistory，
+                                    ResumeApproved 的 ErrResumeAgentMismatch、ErrSystemMessageInHistory、
+                                    dangling 批的 ErrInvalidToolCallID/ErrDuplicateToolCallID（[T-RESUME] 步骤1），
                                     以及 wrap(ErrInvalidApproval)（ApprovalError，或快照非法：空 pending / mode override / dangling 缺失）。
                                     ⟶ Run / ResumeApproved: 直接返回 error，不触发 OnError，不执行任何工具。
                                     ⟶ Stream: 经 iterator 第二返回值并配 StreamError 报告，触发 OnError。
@@ -206,7 +213,7 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
 
 `ResumeApproved` 在校验通过后进入 executeBatch；该阶段的工具执行错误属运行期终止错误，触发 OnError 恰好一次（与 `[T-TOOLS]` 一致）。
 
-可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`、`ErrNotSuspended`（`Result.SuspendedRun` 用）、`ErrInvalidApproval`（由 `ApprovalError.Unwrap` 暴露）、`ErrResumeAgentMismatch`。`ErrNotSuspended` 与 `ErrInvalidApproval` 是不同条件，不得混淆。消费者用 `errors.Is` / `errors.As` 分支。
+可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`、`ErrNotSuspended`（`Result.SuspendedRun` 用）、`ErrInvalidApproval`（由 `ApprovalError.Unwrap` 暴露）、`ErrResumeAgentMismatch`、`ErrInvalidToolCallID`、`ErrDuplicateToolCallID`。`ErrNotSuspended` 与 `ErrInvalidApproval` 是不同条件，不得混淆。消费者用 `errors.Is` / `errors.As` 分支。
 
 ## 7. 不变量
 
@@ -227,6 +234,7 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
 | I10 | 安全边界恢复完备 | 在 completed turn boundary（history 末尾为 user/tool 消息或无 pending tool_use 的 assistant 消息）上，`(history, mode.Name)` 足以继续运行 |
 | I12 | 审批恢复完备 | `ResumeApproved` 校验通过后，挂起批中**每个** `tool_use` 在追加的单条 `RoleTool` 消息中都有对应 `tool_result`（被批准/原 Allow 的为真实结果，被拒绝的为 `IsError=true` 的 `rejected:` 结果），故续接的 `[T-MODEL]` 观察到一个良构 history |
 | I13 | 幂等键稳定 | `RunID` 非空时，任一 `ToolCallID` 注入的 `IdempotencyKey` 是 `(RunID, ToolCallID)` 的确定性函数，与串行、并行、`ResumeApproved` 执行路径无关 |
+| I14 | CallID 良构 | 每个进入 `authorizeBatch`（及 `ResumeApproved` 的 dangling 批）的批次中，∀ tool_use: `ID ≠ ""` 且 ID 在批内唯一；违反者在任何 resolve/authorize/execute 前 halt，批次无副作用 |
 
 ### 7.1 关于 I6（协议轨迹等价）与诱导取消
 

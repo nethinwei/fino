@@ -32,6 +32,14 @@ var (
 	// its event contract: it must yield exactly one TurnMessage per turn and must
 	// not yield FinalMessage (FinalMessage is emitted only by the Runner).
 	ErrStreamContract = errors.New("model stream contract violated")
+	// ErrInvalidToolCallID indicates a tool_use block carried an empty ID. The
+	// Runner rejects the batch before authorizing or executing any tool, because
+	// approval, the idempotency key, and the replay tape all key on the ID.
+	ErrInvalidToolCallID = errors.New("invalid tool call id")
+	// ErrDuplicateToolCallID indicates two tool_use blocks in the same batch
+	// shared an ID, which makes approval matching and the idempotency key
+	// ambiguous. The Runner rejects the batch before executing any tool.
+	ErrDuplicateToolCallID = errors.New("duplicate tool call id")
 )
 
 // ToolDeniedError reports that a Policy denied a tool invocation. It wraps
@@ -504,6 +512,27 @@ func (r *Runner) executeBatchSerial(ctx context.Context, st *runState, selected 
 	return ctx, blocks, nil
 }
 
+// validateToolCallIDs enforces the tool-use ID invariants for a batch: every ID
+// must be non-empty and unique within the batch. Approval matching
+// (Approval.CallID), the idempotency key (RunID:ToolCallID), and the replay tape
+// all key on the ID, so the Runner turns the provider's "unique non-empty IDs"
+// expectation into a checked invariant rather than a silent assumption. It runs
+// before any resolve, authorize, or execute, so a malformed batch produces no
+// side effects.
+func validateToolCallIDs(calls []message.ToolUse) error {
+	seen := make(map[string]bool, len(calls))
+	for _, c := range calls {
+		if c.ID == "" {
+			return fmt.Errorf("%w: tool %q has an empty tool_use ID", ErrInvalidToolCallID, c.Name)
+		}
+		if seen[c.ID] {
+			return fmt.Errorf("%w: %q", ErrDuplicateToolCallID, c.ID)
+		}
+		seen[c.ID] = true
+	}
+	return nil
+}
+
 // authorizeBatch resolves and authorizes every call serially in call order.
 // Resolving and authorizing stay serial so Policy ordering is deterministic and
 // the batch fails fast on the first missing or denied tool. Suspends do not
@@ -512,6 +541,9 @@ func (r *Runner) executeBatchSerial(ctx context.Context, st *runState, selected 
 // the suspended calls collected in call order. When the returned pending slice
 // is non-empty, the batch suspended and the caller must not execute it.
 func (r *Runner) authorizeBatch(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, calls []message.ToolUse) ([]tool.Tool, []PendingToolCall, error) {
+	if err := validateToolCallIDs(calls); err != nil {
+		return nil, nil, err
+	}
 	selected := make([]tool.Tool, len(calls))
 	var pending []PendingToolCall
 	for i, call := range calls {

@@ -164,6 +164,12 @@ func validateSuspendedRun(suspended SuspendedRun, approvals []Approval) error {
 	if len(batch) == 0 {
 		return fmt.Errorf("%w: suspended history has no dangling tool_use", ErrInvalidApproval)
 	}
+	// The dangling batch supplies the IDs that approvals and the resumed
+	// idempotency key bind to, so it must satisfy the same ID invariants the
+	// original run enforced in authorizeBatch.
+	if err := validateToolCallIDs(batch); err != nil {
+		return err
+	}
 	if len(suspended.PendingCalls) == 0 {
 		// A genuine suspended Result always has ≥1 suspended call. An empty
 		// pending set with dangling tool_uses would silently degrade into a
