@@ -4,7 +4,7 @@
 
 **Goal:** Add a first-class `ResumeApproved` API that executes the original pending tool calls after human approval. A suspended run produces a `SuspendedRun` snapshot; the caller collects approvals and passes them to `ResumeApproved`, which validates, executes approved calls, writes rejections as visible `tool_result` blocks, and continues the ReAct loop.
 
-**Architecture:** Core change in `runner/` only. No new packages. `PendingToolCall` gains `AgentName`/`ModeName`. New types: `SuspendedRun`, `Approval`, `ApprovalError`. New method: `Runner.ResumeApproved`. Existing `WithResumeFromPendingTools` seam is unchanged.
+**Architecture:** Core change in `runner/` only. No new packages. `PendingToolCall` unchanged. New types: `SuspendedRun` (carries `LastAgent`+`LastMode` once, not per-call), `Approval`, `ApprovalError` (with `ErrInvalidApproval` sentinel, NOT `ErrNotSuspended`). New method: `Runner.ResumeApproved`. Existing `WithResumeFromPendingTools` seam is unchanged.
 
 **Tech Stack:** Go 1.23+, standard library only, TDD (red → green → refactor).
 
@@ -22,9 +22,8 @@
 ## Files
 
 ```text
-runner/runner.go                     (modify: PendingToolCall, add SuspendedRun/Approval/ApprovalError/ResumeApproved/SuspendedRun())
+runner/runner.go                     (modify: add SuspendedRun/Approval/ApprovalError/ResumeApproved/SuspendedRun())
 runner/runner_test.go                (modify: add resume tests)
-runner/suspend_test.go               (modify: update PendingToolCall assertions)
 runner/resume_test.go                (new: ResumeApproved tests)
 docs/spec/loop-semantics.md          (modify: add [T-RESUME], split §7.2, add I12)
 docs/design.md                       (modify: update 人工确认和恢复 section)
@@ -38,28 +37,17 @@ README.zh-CN.md                      (modify: add HITL section if absent)
 
 ---
 
-## Task 1: Extend PendingToolCall and Add Types
+## Task 1: Add Types
 
 **Files:**
 - Modify: `runner/runner.go`
 
-- [ ] Add `AgentName` and `ModeName` to `PendingToolCall`:
-
-```go
-type PendingToolCall struct {
-    Tool      tool.Info
-    Call      message.ToolUse
-    Reason    string
-    AgentName string
-    ModeName  string
-}
-```
-
-- [ ] Add `SuspendedRun`:
+- [ ] Add `SuspendedRun` (agent/mode context recorded once, not per pending call):
 
 ```go
 type SuspendedRun struct {
     Messages     []message.Message
+    LastAgent    *agent.Agent
     LastMode     string
     PendingCalls []PendingToolCall
 }
@@ -75,10 +63,11 @@ type Approval struct {
 }
 ```
 
-- [ ] Add `ApprovalError`:
+- [ ] Add `ApprovalError` with independent sentinel (NOT `ErrNotSuspended`):
 
 ```go
 var ErrNotSuspended = errors.New("result is not suspended")
+var ErrInvalidApproval = errors.New("invalid approval")
 
 type ApprovalError struct {
     Missing   []string
@@ -87,7 +76,7 @@ type ApprovalError struct {
 }
 
 func (e *ApprovalError) Error() string
-func (e *ApprovalError) Unwrap() error { return ErrNotSuspended }
+func (e *ApprovalError) Unwrap() error { return ErrInvalidApproval }
 ```
 
 - [ ] Add `Result.SuspendedRun()`:
@@ -99,27 +88,18 @@ func (r *Result) SuspendedRun() (SuspendedRun, error) {
     }
     return SuspendedRun{
         Messages:     r.Messages,
+        LastAgent:    r.LastAgent,
         LastMode:     r.LastMode,
         PendingCalls: r.PendingCalls,
     }, nil
 }
 ```
 
-- [ ] Update `authorizeBatch` to populate `AgentName`/`ModeName`:
+- [ ] `PendingToolCall` is NOT modified. No `AgentName`/`ModeName` fields added. Agent/mode context lives on `SuspendedRun` once.
 
-```go
-pending = append(pending, PendingToolCall{
-    Tool:      t.Info(),
-    Call:      call,
-    Reason:    decision.Reason,
-    AgentName: st.agent.Name(),
-    ModeName:  st.mode.Name,
-})
-```
+- [ ] `authorizeBatch` is NOT modified. No per-call fields to populate.
 
-- [ ] Run `go test ./runner`. Existing tests may fail on PendingToolCall field changes — fix assertions.
-
-Expected: PASS.
+- [ ] Run `go test ./runner`. Expected: PASS (no existing assertions change).
 
 ---
 
@@ -130,7 +110,7 @@ Expected: PASS.
 
 Write tests that will fail because `ResumeApproved` doesn't exist yet:
 
-- [ ] **Test 1: SuspendedRun extraction from suspended result** — create a suspended result, call `SuspendedRun()`, assert fields match.
+- [ ] **Test 1: SuspendedRun extraction from suspended result** — create a suspended result, call `SuspendedRun()`, assert fields match including `LastAgent`.
 
 - [ ] **Test 2: SuspendedRun from completed result errors** — call `SuspendedRun()` on a non-suspended Result, expect `ErrNotSuspended`.
 
@@ -144,17 +124,21 @@ Write tests that will fail because `ResumeApproved` doesn't exist yet:
 
 - [ ] **Test 7: No re-authorization** — Policy would deny `fetch` if asked again. `ResumeApproved` with approval still executes it (Policy is NOT called).
 
-- [ ] **Test 8: Missing approval returns ApprovalError** — 2 pending calls, only 1 approval → `ApprovalError{Missing: ["call_2"]}`, no tools execute.
+- [ ] **Test 8: Missing approval returns ApprovalError** — 2 pending calls, only 1 approval → `ApprovalError{Missing: ["call_2"]}`, no tools execute. Verify `errors.Is(err, ErrInvalidApproval)` is true, `errors.Is(err, ErrNotSuspended)` is false.
 
 - [ ] **Test 9: Unknown CallID returns ApprovalError** — Approval references a CallID not in pending calls → `ApprovalError{Unknown: ["call_99"]}`.
 
 - [ ] **Test 10: Duplicate approval returns ApprovalError** — Two approvals for same CallID → `ApprovalError{Duplicate: ["call_1"]}`.
 
-- [ ] **Test 11: OnError not triggered on validation failure** — Pre-loop validation errors do not fire OnError.
+- [ ] **Test 11: Agent mismatch returns error** — Handoff switches from agent A to agent B, B's tool is suspended. Caller passes agent A to `ResumeApproved` → error (A.Name ≠ B.Name), no tools execute.
 
-- [ ] **Test 12: OnError triggered on execution error** — Tool execution error during resume triggers OnError once.
+- [ ] **Test 12: Handoff then suspend then resume** — Agent A handoffs to B → B's tool `fetch` is suspended → `ResumeApproved` with correct agent B executes `fetch` and continues.
 
 - [ ] **Test 13: Handoff in approved batch** — Handoff tool in resumed batch applies batch-terminal, last-wins.
+
+- [ ] **Test 14: OnError not triggered on validation failure** — Pre-loop validation errors do not fire OnError.
+
+- [ ] **Test 15: OnError triggered on execution error** — Tool execution error during resume triggers OnError once.
 
 - [ ] Run `go test ./runner`. Expected: compilation fails (ResumeApproved not defined).
 
@@ -189,11 +173,17 @@ func (r *Runner) ResumeApproved(
     approvals []Approval,
     opts ...RunOption,
 ) (*Result, error) {
-    // 1. Validate
+    // 0. Validate agent matches snapshot
+    if a.Name() != suspended.LastAgent.Name() {
+        return nil, fmt.Errorf("agent mismatch: passed %q, expected %q", a.Name(), suspended.LastAgent.Name())
+    }
+    // 1. Validate SuspendedRun + approvals
     if err := validateSuspendedRun(suspended, approvals); err != nil {
         return nil, err
     }
     // 2. Prepare run state from suspended snapshot
+    //    mode = a.Mode(suspended.LastMode)
+    //    history = suspended.Messages
     // 3. Build approval lookup map
     // 4. Execute batch: for each tool_use in call order:
     //    - suspended call: approved → execute; rejected → error result
@@ -204,6 +194,8 @@ func (r *Runner) ResumeApproved(
 }
 ```
 
+The agent check (step 0) is critical: if a handoff switched to agent B before suspend, the caller must pass B (from `Result.LastAgent`), not the root agent A. Otherwise `a.Mode(LastMode)` would resolve tools in A's context, likely causing `ErrToolNotFound`.
+
 The key internal helper is `resumeExecuteBatch`, which iterates over the tool_use blocks from the dangling assistant message, resolves each tool from the agent's mode, and executes or writes rejection results based on the approval map.
 
 - [ ] Run `go test ./runner -run Resume`. Expected: PASS (tests from Task 2 now green).
@@ -212,18 +204,7 @@ The key internal helper is `resumeExecuteBatch`, which iterates over the tool_us
 
 ---
 
-## Task 4: Update Suspend Test Assertions
-
-**Files:**
-- Modify: `runner/suspend_test.go`
-
-- [ ] Update all `PendingToolCall` assertions to include `AgentName` and `ModeName`. Every existing test that checks `PendingCalls[0]` needs to verify the new fields.
-
-- [ ] Run `go test ./runner`. Expected: PASS.
-
----
-
-## Task 5: Update Loop Semantics Spec
+## Task 4: Update Loop Semantics Spec
 
 **Files:**
 - Modify: `docs/spec/loop-semantics.md`
@@ -252,7 +233,7 @@ The key internal helper is `resumeExecuteBatch`, which iterates over the tool_us
 
 ---
 
-## Task 6: Update Design Document
+## Task 5: Update Design Document
 
 **Files:**
 - Modify: `docs/design.md`
@@ -263,7 +244,7 @@ The key internal helper is `resumeExecuteBatch`, which iterates over the tool_us
 
 ---
 
-## Task 7: Update Example
+## Task 6: Update Example
 
 **Files:**
 - Modify: `examples/cookbook/hitl_resume/main.go`
@@ -282,7 +263,7 @@ The key internal helper is `resumeExecuteBatch`, which iterates over the tool_us
 
 ---
 
-## Task 8: Update x/recover
+## Task 7: Update x/recover
 
 **Files:**
 - Modify: `x/recover/recover.go`
@@ -301,7 +282,7 @@ This is a thin wrapper: it builds a `SuspendedRun` from the snapshot's history a
 
 ---
 
-## Task 9: Update CHANGELOG and READMEs
+## Task 8: Update CHANGELOG and READMEs
 
 **Files:**
 - Modify: `CHANGELOG.md`
@@ -324,10 +305,12 @@ This is a thin wrapper: it builds a `SuspendedRun` from the snapshot's history a
   ReAct loop. Rejected calls are NOT executed — their refusal reason is
   visible to the model so it can adjust. Previously-allowed calls in a
   suspended batch are also executed on resume.
-- **Extended PendingToolCall** — `AgentName` and `ModeName` fields record the
-  active agent/mode when the call was suspended.
+- **SuspendedRun** — carries `LastAgent` and `LastMode` from the suspended
+  result so `ResumeApproved` validates the correct agent context (critical
+  after handoff: the caller must pass the agent that was active at suspend
+  time, not the root agent).
 - **ApprovalError** — typed error for validation failures (missing, unknown, or
-  duplicate approvals).
+  duplicate approvals), with `ErrInvalidApproval` sentinel.
 
 ### Changed
 
@@ -340,7 +323,7 @@ This is a thin wrapper: it builds a `SuspendedRun` from the snapshot's history a
 
 ---
 
-## Task 10: Final Verification
+## Task 9: Final Verification
 
 - [ ] Run `gofmt -l .`. Expected: no output.
 - [ ] Run `go vet ./...`. Expected: no issues.
@@ -360,7 +343,9 @@ This is a thin wrapper: it builds a `SuspendedRun` from the snapshot's history a
 - `WithResumeFromPendingTools` still works unchanged (backward compatible).
 - No `InputHash` — tamper detection is a user-level concern.
 - No Stream changes — `ResumeApproved` is Run-only.
-- `ApprovalError` provides structured validation feedback.
+- `ApprovalError.Unwrap()` returns `ErrInvalidApproval`, NOT `ErrNotSuspended`.
+- `SuspendedRun` carries `LastAgent` + `LastMode` once; `PendingToolCall` is NOT extended.
+- Agent mismatch (handoff before suspend) is validated and returns an error.
 - Loop semantics spec updated with `[T-RESUME]` and I12.
 - Example updated to use `DecisionSuspend` + `ResumeApproved`.
 - No new packages, no new external dependencies.

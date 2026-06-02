@@ -21,14 +21,15 @@ Without `ResumeApproved`, HITL approval requires the caller to manually reconstr
 ```go
 type SuspendedRun struct {
     Messages     []message.Message
+    LastAgent    *agent.Agent
     LastMode     string
     PendingCalls []PendingToolCall
 }
 ```
 
-`SuspendedRun` is a plain data snapshot extracted from a suspended `Result`. It is not a checkpoint, not a state machine, and not persisted by the core. The caller serializes it however they want (JSON, database, file).
+`SuspendedRun` is a plain data snapshot extracted from a suspended `Result`. It is not a checkpoint, not a state machine, and not persisted by the core. The caller serializes it however they want (JSON, database, file). `LastAgent` and `LastMode` record the agent/mode that were active at suspend time. A handoff may have switched away from the root agent before suspend; `ResumeApproved` validates that the passed agent matches `LastAgent`.
 
-`PendingToolCall` gains `AgentName` and `ModeName` fields (present in `policy.Request` but absent from the current PR2 struct), so `ResumeApproved` can re-authorize calls in the correct context. No `InputHash` field — tamper detection is a user-level concern, not a core seam (see Rationale below).
+`PendingToolCall` does NOT gain per-call `AgentName`/`ModeName` fields. A suspended batch always belongs to a single agent+mode context (batch partitioning is out of scope), so the agent/mode identity belongs once on `SuspendedRun`, not repeated per pending call. No `InputHash` field — tamper detection is a user-level concern, not a core seam (see Rationale below).
 
 **Rationale for omitting InputHash**: A hash binds the approval to the observed input, but if the caller can modify `SuspendedRun.Messages`, they can also modify `InputHash`. Within a single process, hash verification provides no real security gain. Cross-process tamper detection requires cryptographic signatures, which are out of scope for the core. Users who need this can add it in `x/` or application code.
 
@@ -58,13 +59,14 @@ func (r *Runner) ResumeApproved(
 
 Flow:
 
-1. **Validate** `SuspendedRun`: last message must be a dangling assistant with tool_use blocks; every `PendingCall.Call.ID` must appear in those blocks; no duplicate pending calls.
-2. **Validate approvals**: every pending call must have exactly one approval; no approval may reference an unknown CallID; no duplicate approvals.
-3. **Execute batch**: for each tool_use in call order:
+1. **Validate agent context**: `a.Name()` must equal `suspended.LastAgent.Name()`. If they differ, return an error — the caller passed the wrong agent (e.g., the root agent instead of the handoff target that was active at suspend time).
+2. **Validate** `SuspendedRun`: last message must be a dangling assistant with tool_use blocks; every `PendingCall.Call.ID` must appear in those blocks; no duplicate pending calls.
+3. **Validate approvals**: every pending call must have exactly one approval; no approval may reference an unknown CallID; no duplicate approvals.
+4. **Execute batch**: for each tool_use in call order:
    - If the call is in `PendingCalls` (was suspended): look up its approval. Approved → execute the tool. Rejected → write `tool_result{IsError: true, Content: [text("rejected: <reason>")]}`.
    - If the call is NOT in `PendingCalls` (was allowed but not executed due to batch suspend): execute it. No approval needed — it was already authorized.
-4. **Append single RoleTool message** with all results in call order.
-5. **Continue ReAct loop** from the next model turn.
+5. **Append single RoleTool message** with all results in call order.
+6. **Continue ReAct loop** from the next model turn.
 
 This means `ResumeApproved` is a loop entry point that starts at step 3 of `[T-TOOLS]` (executeBatch), not at `[T-MODEL]`. The model is not called until after the batch completes.
 
@@ -93,7 +95,7 @@ For previously-allowed calls in the batch, they were already authorized and appr
 func (r *Result) SuspendedRun() (SuspendedRun, error)
 ```
 
-Returns an error if `Suspended` is false. This is a convenience method; callers could build `SuspendedRun` manually from `Result` fields, but the helper ensures consistency (particularly the `AgentName`/`ModeName` fields on `PendingToolCall`).
+Returns an error if `Suspended` is false. This is a convenience method; callers could build `SuspendedRun` manually from `Result` fields, but the helper ensures consistency (particularly the `LastAgent` field which must match the agent active at suspend time).
 
 ### D7: Relationship to WithResumeFromPendingTools
 
@@ -108,19 +110,13 @@ Returns an error if `Suspended` is false. This is a convenience method; callers 
 
 PR2 downgrades `DecisionSuspend` to `ToolDeniedError` in `Stream`. PR3 does not change this. `ResumeApproved` is a `Run`-only API. Extending `Stream` with suspend/resume events is deferred — it requires new event types and would expand the stream contract for all consumers.
 
-### D9: PendingToolCall extended fields
+### D9: Agent context on SuspendedRun, not per PendingToolCall
 
-```go
-type PendingToolCall struct {
-    Tool      tool.Info
-    Call      message.ToolUse
-    Reason    string
-    AgentName string // new: agent that was active when the call was suspended
-    ModeName  string // new: mode that was active when the call was suspended
-}
-```
+A suspended batch always belongs to a single agent+mode context — batch partitioning is explicitly out of scope, so all pending calls share the same agent and mode. Recording `AgentName`/`ModeName` per `PendingToolCall` would be denormalized redundancy (and `ModeName` would duplicate `SuspendedRun.LastMode` with no cross-check).
 
-These fields are needed so `ResumeApproved` can identify which agent/mode context the call belongs to, without requiring the caller to pass this information separately.
+Instead, `SuspendedRun` carries `LastAgent` and `LastMode` once. `PendingToolCall` keeps its original three fields (`Tool`, `Call`, `Reason`) unchanged from PR2.
+
+`ResumeApproved` validates that the passed agent matches `SuspendedRun.LastAgent` — if not, the caller has the wrong agent (e.g., the root agent after a handoff switched to a target agent before suspend). This prevents `a.Mode(LastMode)` from resolving tools in the wrong agent context, which would cause `ErrToolNotFound`.
 
 ## Changes by Package
 
@@ -128,12 +124,11 @@ These fields are needed so `ResumeApproved` can identify which agent/mode contex
 
 | Change | Detail |
 |--------|--------|
-| Extend `PendingToolCall` | Add `AgentName`, `ModeName` fields |
-| Add `SuspendedRun` struct | `Messages`, `LastMode`, `PendingCalls` |
+| Add `SuspendedRun` struct | `Messages`, `LastAgent`, `LastMode`, `PendingCalls` |
 | Add `Approval` struct | `CallID`, `Approved`, `Reason` |
+| Add `ApprovalError` struct | `Missing`, `Unknown`, `Duplicate`; `Unwrap` returns `ErrInvalidApproval` |
 | Add `Result.SuspendedRun()` | Helper to extract snapshot from suspended result |
-| Add `Runner.ResumeApproved()` | Validate → execute approved batch → continue loop |
-| Update `authorizeBatch` | Populate `AgentName`/`ModeName` on `PendingToolCall` |
+| Add `Runner.ResumeApproved()` | Validate agent + approvals → execute approved batch → continue loop |
 
 ### runner/runner_stream.go
 
@@ -157,11 +152,14 @@ No changes. Stream suspend remains downgraded to deny.
 
 ```text
 [T-RESUME]   pre: ResumeApproved called with valid SuspendedRun + approvals
+              step 0 agent check:
+                a.Name() == SuspendedRun.LastAgent.Name()
+                mismatch ⟶ return error (not OnError; pre-loop)
               step 1 validate:
                 SuspendedRun.Messages tail = dangling assistant with tool_use blocks
                 PendingCalls ⊆ tool_use blocks (by Call.ID)
                 approvals: one per PendingCall, no unknown/duplicate CallIDs
-                validation failure ⟶ return error (not OnError; pre-loop)
+                validation failure ⟶ return ApprovalError (not OnError; pre-loop)
               step 2 executeBatch:
                 For each tool_use cᵢ in call order:
                   if cᵢ ∈ PendingCalls (suspended):
@@ -179,22 +177,26 @@ No changes. Stream suspend remains downgraded to deny.
 
 ```go
 var ErrNotSuspended = errors.New("result is not suspended")
+var ErrInvalidApproval = errors.New("invalid approval")
 
 type ApprovalError struct {
-    Missing  []string // CallIDs with no approval
-    Unknown  []string // Approval CallIDs not in pending calls
+    Missing   []string // CallIDs with no approval
+    Unknown   []string // Approval CallIDs not in pending calls
     Duplicate []string // CallIDs with multiple approvals
 }
+
+func (e *ApprovalError) Error() string
+func (e *ApprovalError) Unwrap() error { return ErrInvalidApproval }
 ```
 
-`ApprovalError` wraps validation failures so callers can distinguish "bad input" from "tool execution failed".
+`ErrNotSuspended` is returned by `Result.SuspendedRun()` when called on a non-suspended result. `ErrInvalidApproval` is the sentinel for `ApprovalError`, which reports validation failures (missing/unknown/duplicate approvals). These are distinct error conditions and must not be conflated.
 
 ## Backward Compatibility
 
 | Scenario | Behavior |
 |----------|----------|
 | Existing `WithResumeFromPendingTools` usage | Unchanged. Still works for blind resume. |
-| Existing `PendingToolCall{Tool, Call, Reason}` | New fields are zero-value; old code that doesn't set them still compiles. `ResumeApproved` requires them to be set (via `Result.SuspendedRun()`). |
+| Existing `PendingToolCall{Tool, Call, Reason}` | Unchanged. No new fields added. |
 | Existing `Result.Suspended` | Unchanged. |
 | Old Policy returning `DecisionSuspend` | Unchanged. |
 
@@ -209,16 +211,17 @@ type ApprovalError struct {
 
 ## Test Plan
 
-1. **Unit: SuspendedRun extraction** — `Result.SuspendedRun()` returns correct snapshot from a suspended result; returns `ErrNotSuspended` from a completed result.
-2. **Unit: PendingToolCall extended fields** — `AgentName` and `ModeName` are populated during authorizeBatch.
-3. **Integration: approve executes tool** — Policy suspends → caller approves → `ResumeApproved` executes the tool, appends RoleTool, continues to next model turn.
-4. **Integration: reject writes error result** — Policy suspends → caller rejects → `ResumeApproved` writes `tool_result{IsError: true}` with rejection reason, does NOT execute the tool.
-5. **Integration: mixed allow + suspend resume** — Batch had call₁=Allow, call₂=Suspend. ResumeApproved executes both (call₁ without approval, call₂ with approval).
-6. **Integration: rejection is model-visible** — After reject, the model sees `tool_result{IsError: true, "rejected: ..."}` and can adjust its next response.
-7. **Integration: no re-authorization** — `ResumeApproved` does not call `Policy.Authorize`. Verified by a Policy that would deny if called again.
-8. **Integration: validation errors** — Missing approval, unknown CallID, duplicate approval, non-suspended result all return `ApprovalError` without executing any tool.
-9. **Integration: handoff in approved batch** — Handoff tool in resumed batch applies batch-terminal, last-wins.
-10. **Integration: OnError not triggered on validation failure** — Pre-loop validation errors are returned directly.
-11. **Integration: OnError triggered on execution error** — Tool execution error during resume triggers OnError once.
-12. **Integration: parallel path not affected** — `WithMaxConcurrency` does not change `ResumeApproved` behavior; the resume batch always executes serially in call order.
-13. **Property: I12** — After `ResumeApproved`, every `tool_use` in the suspended batch has a corresponding `tool_result` in the appended `RoleTool` message.
+1. **Unit: SuspendedRun extraction** — `Result.SuspendedRun()` returns correct snapshot (including `LastAgent`) from a suspended result; returns `ErrNotSuspended` from a completed result.
+2. **Integration: approve executes tool** — Policy suspends → caller approves → `ResumeApproved` executes the tool, appends RoleTool, continues to next model turn.
+3. **Integration: reject writes error result** — Policy suspends → caller rejects → `ResumeApproved` writes `tool_result{IsError: true}` with rejection reason, does NOT execute the tool.
+4. **Integration: mixed allow + suspend resume** — Batch had call₁=Allow, call₂=Suspend. ResumeApproved executes both (call₁ without approval, call₂ with approval).
+5. **Integration: rejection is model-visible** — After reject, the model sees `tool_result{IsError: true, "rejected: ..."}` and can adjust its next response.
+6. **Integration: no re-authorization** — `ResumeApproved` does not call `Policy.Authorize`. Verified by a Policy that would deny if called again.
+7. **Integration: validation errors** — Missing approval, unknown CallID, duplicate approval, non-suspended result all return `ApprovalError` without executing any tool.
+8. **Integration: agent mismatch returns error** — Handoff switches to agent B, B suspends. Caller passes root agent A to `ResumeApproved` → error (A.Name ≠ B.Name), no tools execute.
+9. **Integration: handoff then suspend then resume** — Agent A handoffs to B → B's tool is suspended → `ResumeApproved` with correct agent B executes the tool and continues.
+10. **Integration: handoff in approved batch** — Handoff tool in resumed batch applies batch-terminal, last-wins.
+11. **Integration: OnError not triggered on validation failure** — Pre-loop validation errors are returned directly.
+12. **Integration: OnError triggered on execution error** — Tool execution error during resume triggers OnError once.
+13. **Integration: parallel path not affected** — `WithMaxConcurrency` does not change `ResumeApproved` behavior; the resume batch always executes serially in call order.
+14. **Property: I12** — After `ResumeApproved`, every `tool_use` in the suspended batch has a corresponding `tool_result` in the appended `RoleTool` message.
