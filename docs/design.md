@@ -510,36 +510,40 @@ handoff 不设置单独深度限制。循环由 `MaxTurns` 兜底，因为 hando
 
 ### Streaming
 
-Streaming 采用 Anthropic 的经验：原始 provider 事件应翻译为语义事件，并能生成最终消息快照。
+Streaming 采用 Anthropic 的经验：原始 provider 事件应翻译为语义事件，并能在每个 turn 末尾生成完整的 assistant 消息快照。
 
-初始流事件类型：
+事件分层（见 `docs/spec/loop-semantics.md` §5）：`TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 provider 的 `model.Stream` 产生；`FinalMessage` 是 **Runner 层**整个 run 的终态结果，只由 `Runner.Stream` 发出一次。provider 不得发 `FinalMessage`。
+
+流事件类型：
 
 - text delta
 - content block start
 - content block delta
 - content block stop
-- tool call
-- tool result
-- handoff
-- final message
+- tool call（Runner 发出）
+- tool result（Runner 发出）
+- handoff（Runner 在批末发出）
+- turn message（模型层：每个 turn 末尾恰好一个完整 assistant 快照）
+- final message（Runner 层：整个 run 终态，仅一个）
 - error
 
-Provider 适配器负责把原生流翻译成这些事件。
+Provider 适配器负责把原生流翻译成 delta/content-block 事件，并在每个 turn 末尾发出恰好一个 `TurnMessage`（不发 `FinalMessage`，其后不再发事件）。Runner 转发这些事件，在无工具调用的最后一个 turn 之后追加唯一的 `FinalMessage`。
 
-`content block start/delta/stop` 是保留消息快照能力的必要事件。即使第一版 provider 适配器只产生 `text delta` 和 `final message`，核心事件模型也必须保留这些事件类型。
+`content block start/delta/stop` 是保留消息快照能力的必要事件。即使第一版 provider 适配器只产生 `text delta` 和 `TurnMessage`，核心事件模型也必须保留这些事件类型。
 
 ### 错误类型
 
 Runner 暴露可判别错误类型，方便用户用 `errors.Is` 或 `errors.As` 做条件分支。
 
-初始错误：
+可判别错误（与 `docs/spec/loop-semantics.md` §6 一致）：
 
 - `ErrMaxTurns`
 - `ErrToolNotFound`
 - `ErrSystemMessageInHistory`
-- `ToolDeniedError`
+- `ErrToolDenied`（sentinel，由 `ToolDeniedError.Unwrap` 暴露）
+- `ErrStreamContract`（仅 Stream：`model.Stream` 违反 `TurnMessage`/`FinalMessage` 事件契约）
 
-其中 `ToolDeniedError` 携带 `policy.Decision` 和工具信息，适合 UI 展示拒绝原因。
+`ToolDeniedError` 携带 `policy.Decision` 和工具信息，适合 UI 展示拒绝原因；用 `errors.Is(err, ErrToolDenied)` 判别，`errors.As` 取细节。`ErrStreamContract` 见 §Streaming 的事件分层。
 
 ## API 风格
 
