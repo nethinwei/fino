@@ -1,14 +1,21 @@
-// Package replay provides record-and-replay for fino agent runs.
+// Package replay provides record-and-replay and an execution tape for fino
+// agent runs.
 //
 // It is a reference composition for the sufficiency thesis in docs/design.md:
-// it adds no core capability and lives outside the core packages. Because the
-// only sources of non-determinism in a run flow through model.Model and
-// tool.Tool, recording those two seams is enough to reproduce a run exactly.
+// it adds no core capability and lives outside the core packages, importing core
+// packages and composing around their public APIs only.
 //
-// Record a run by wrapping its model with RecordingModel and its tools with
-// RecordingTool sharing one *Log. Persist the Log as JSON. Replay by driving an
-// identical agent with ReplayModel and ReplayTool built from the Log; no
-// provider or real tool is ever called.
+// Log.Model and Log.Tools are the replay execution source: wrap a run's model
+// with RecordingModel and its tools with RecordingTool sharing one *Log, persist
+// the Log as JSON, then drive an identical agent with ReplayModel and ReplayTool;
+// no provider or real tool is ever called.
+//
+// Log.Events is the structured audit tape over public seams. RecordingPolicy and
+// ReplayPolicy add the policy seam, and the RecordSuspend, RecordApproval,
+// RecordResume, and RecordTermination helpers record run boundaries that no
+// model/tool/policy wrapper can observe. The tape is reproducibility and audit
+// evidence, not proof of business correctness: it provides no exactly-once side
+// effects, durable workflow, or tamper resistance.
 package replay
 
 import (
@@ -36,24 +43,33 @@ type ToolRecord struct {
 	Err    string          `json:"err,omitempty"`
 }
 
-// Log is the ordered record of a run: model responses in call order and tool
-// executions. It is JSON-serializable. Recording is concurrency-safe so tools
-// running in parallel can record without races.
+// Log is the ordered record of a run. Model and Tools are the replay execution
+// source: model responses in call order and tool executions. Events is the
+// structured audit/eval tape over public seams. It is JSON-serializable.
+// Recording is concurrency-safe so tools running in parallel can record without
+// races.
+//
+// Model/Tools and Events intentionally overlap: Model/Tools drive replay while
+// Events is the audit layer. That redundancy is a compatibility bridge; replay
+// still reads Model and Tools, not Events.
 type Log struct {
-	mu    sync.Mutex
-	Model []message.Message `json:"model"`
-	Tools []ToolRecord      `json:"tools"`
+	mu     sync.Mutex
+	Model  []message.Message `json:"model"`
+	Tools  []ToolRecord      `json:"tools"`
+	Events []Event           `json:"events,omitempty"`
 }
 
 func (l *Log) recordModel(m message.Message) {
 	l.mu.Lock()
 	l.Model = append(l.Model, m)
+	l.Events = append(l.Events, Event{Kind: EventModelResponse, ModelResponse: &ModelResponseEvent{Message: m}})
 	l.mu.Unlock()
 }
 
 func (l *Log) recordTool(r ToolRecord) {
 	l.mu.Lock()
 	l.Tools = append(l.Tools, r)
+	l.Events = append(l.Events, Event{Kind: EventToolExecution, ToolExecution: &ToolExecutionEvent{Record: r}})
 	l.mu.Unlock()
 }
 
@@ -196,24 +212,28 @@ func (t replayTool) Run(_ context.Context, input json.RawMessage) (tool.Result, 
 	return rec.Result, nil
 }
 
-// Marshal serializes the Log to JSON.
+// Marshal serializes the Log to JSON, including the Events tape. Fixtures
+// written before the tape existed omit "events" and still load (Events is nil).
 func (l *Log) Marshal() ([]byte, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return json.Marshal(struct {
-		Model []message.Message `json:"model"`
-		Tools []ToolRecord      `json:"tools"`
-	}{Model: l.Model, Tools: l.Tools})
+		Model  []message.Message `json:"model"`
+		Tools  []ToolRecord      `json:"tools"`
+		Events []Event           `json:"events,omitempty"`
+	}{Model: l.Model, Tools: l.Tools, Events: l.Events})
 }
 
-// Unmarshal parses a Log from JSON produced by Marshal.
+// Unmarshal parses a Log from JSON produced by Marshal. A legacy fixture without
+// an "events" field loads with Events nil; replay still uses Model and Tools.
 func Unmarshal(data []byte) (*Log, error) {
 	var raw struct {
-		Model []message.Message `json:"model"`
-		Tools []ToolRecord      `json:"tools"`
+		Model  []message.Message `json:"model"`
+		Tools  []ToolRecord      `json:"tools"`
+		Events []Event           `json:"events,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	return &Log{Model: raw.Model, Tools: raw.Tools}, nil
+	return &Log{Model: raw.Model, Tools: raw.Tools, Events: raw.Events}, nil
 }

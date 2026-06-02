@@ -31,13 +31,22 @@ type Case struct {
 }
 
 // Run executes the case deterministically against a ReplayModel and applies the
-// assertion. It returns nil on success or a descriptive error.
+// assertion. It returns nil on success or a descriptive error. It delegates to
+// RunWithOptions with no extra runner options (default AllowAll policy).
 func Run(ctx context.Context, c Case) error {
+	return RunWithOptions(ctx, c)
+}
+
+// RunWithOptions is Run with explicit runner options. Tests that need full tape
+// fidelity can pass runner.WithPolicy(&replay.ReplayPolicy{Log: c.Log}) so a
+// policy-sensitive run replays its recorded decisions instead of falling back to
+// the default AllowAll. The Case shape is unchanged for compatibility.
+func RunWithOptions(ctx context.Context, c Case, opts ...runner.Option) error {
 	a, err := c.Agent()
 	if err != nil {
 		return fmt.Errorf("eval %q: build agent: %w", c.Name, err)
 	}
-	r, err := runner.New(&replay.ReplayModel{Log: c.Log})
+	r, err := runner.New(&replay.ReplayModel{Log: c.Log}, opts...)
 	if err != nil {
 		return fmt.Errorf("eval %q: new runner: %w", c.Name, err)
 	}

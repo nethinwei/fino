@@ -270,11 +270,13 @@ fino's thesis is that **reliable execution infrastructure for complex tool-using
 
 | Add-on | Problem | Seam it rides on |
 | --- | --- | --- |
-| [`x/replay`](x/replay) | Reproducibility & debugging | records current model/tool effects; policy decisions and behavior-affecting interceptors are not yet part of a full execution tape |
+| [`x/replay`](x/replay) | Reproducibility & audit | records an execution tape over public seams — model responses, policy decisions, tool executions, suspends, approvals, resumes, and termination; replay drives the run without calling real providers, tools, or policies |
 | [`x/recover`](x/recover) | Crash recovery & durable continuation | safe-boundary continuation (`history + mode`) plus an opt-in pending-tool seam for blind/crash resume; HITL approval resume is `runner.ResumeApproved`, not `x/recover` |
 | [`x/trace`](x/trace) | Tracing & observability | deterministic `hooks.Hooks` firing |
 | [`x/budget`](x/budget) | Cost / token budgets | a `model.Model` decorator |
-| [`x/eval`](x/eval) | Reproducible regression testing | currently built on recorded model/tool effects; future execution tapes will close the policy/suspend boundary |
+| [`x/eval`](x/eval) | Reproducible regression testing | runs deterministic cases over the recorded tape; `RunWithOptions` can wire `ReplayPolicy` for policy-sensitive fixtures |
+
+The replay tape is reproducibility and audit evidence, not proof of business correctness; it provides no exactly-once side effects, durable workflow, or tamper resistance.
 
 The core never changes to add a capability — only, if ever, to expose a missing seam. See the **seam discipline** in [`docs/design.md`](docs/design.md).
 
@@ -282,7 +284,7 @@ The core never changes to add a capability — only, if ever, to expose a missin
 
 The API follows a consistent shape — `NewX(required, opts ...Option) (*X, error)` — and is approaching stability, but may still change before a tagged `v1`. Pin a commit if you need reproducibility.
 
-See [`docs/roadmap.md`](docs/roadmap.md) for the planned path toward typed tool effects, suspend/resume, execution tapes, and effect-aware concurrency.
+See [`docs/roadmap.md`](docs/roadmap.md) for the planned path toward effect-aware concurrency and the idempotency boundary.
 
 ## Contributing
 

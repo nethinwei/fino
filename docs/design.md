@@ -693,7 +693,7 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 2. **循环不变量**：用 property-based 测试在任意调度下验证语义性质，而非只做逐场景断言。
 3. **参考组合**：用核心之外的最小 add-on（重放、恢复、可观测、预算、评估）构造性地证明接缝足够。
 
-这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复、人工审批恢复（`ResumeApproved`，I12）和若干 `x/` 参考组合；effect-aware 并发、execution tape 和幂等边界属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
+这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复、人工审批恢复（`ResumeApproved`，I12）、`x/replay` 的 execution tape（模型/Policy/工具/suspend/approval/resume/termination）和若干 `x/` 参考组合；effect-aware 并发与幂等边界属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
 
 ## 形式化循环语义
 
@@ -781,9 +781,9 @@ parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至�
 
 ### 重放（record & replay）
 
-- 依赖接缝：当前记录 `model.Model` 与 `tool.Tool` 的效应。
-- 实现：录制为包一层 Model/Tool 记录有序响应日志；重放为注入预录响应、旁路真实调用。
-- 边界：Policy 决策、suspend/resume 决策和会影响行为的 interceptor 尚未进入完整 execution tape，因此当前 replay 只复现已记录的模型/工具轨迹，不证明完整执行等价。
+- 依赖接缝：在公共接缝上记录 execution tape——`model.Model`、`tool.Tool`、`policy.Policy`，以及 run 边界（suspend、approval、resume、termination）。
+- 实现：`RecordingModel`/`RecordingTool`/`RecordingPolicy` 包一层记录有序事件；`RecordSuspend`/`RecordApproval`/`RecordResume`/`RecordTermination` 在公共 API 调用后显式记录 run 边界。重放（`ReplayModel`/`ReplayTool`/`ReplayPolicy`）注入预录结果、旁路真实 provider、工具与 Policy。
+- 边界：tape 是可复现性与审计证据，不证明业务正确性；它不提供 exactly-once 副作用、durable workflow 或防篡改能力。`Log.Model`/`Log.Tools` 仍是重放执行源，`Events` 是叠加的审计层。
 
 ```go
 type RecordingModel struct{ Next model.Model; Log *Log }

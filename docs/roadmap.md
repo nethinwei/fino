@@ -54,7 +54,7 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 | PR1 | Tool effects | Add `tool.Effects`, `tool.WithEffects`, and surface effects through `policy.Request.Tool`. | v0.3.0 |
 | PR2 | Three-state policy | Add Allow / Deny / Suspend decisions and suspended `runner.Result`. | v0.3.0 |
 | PR3 | Approved resume | Add `SuspendedRun`, `PendingToolCall`, `Approval`, and `Runner.ResumeApproved`. | v0.4.0 |
-| PR4 | Execution tape | Define recorded model, policy, tool, suspension, resume, and termination events. | v0.5.0 |
+| PR4 ✅ | Execution tape | Define recorded model, policy, tool, suspension, resume, and termination events. | v0.5.0 |
 | PR5 | Effect-aware concurrency | Make `WithMaxConcurrency` honor `Effects.ParallelSafe` by default. | v0.6.0 |
 | PR6 | Idempotency boundary | Define idempotency keys and retry constraints without automatic write retries. | v0.6.0 |
 | PR7 | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
@@ -153,6 +153,12 @@ Define replay as a recorded execution trace, not a proof of business correctness
 The tape should record model outputs, policy decisions, tool executions,
 suspensions, approvals, resumes, and termination. Replay should not call real
 providers or real side-effecting tools.
+
+Delivered in `x/replay` as an `Events` tape layered over the existing
+`Log.Model`/`Log.Tools` replay source: `RecordingPolicy`/`ReplayPolicy` cover the
+policy seam, and `RecordSuspend`/`RecordApproval`/`RecordResume`/`RecordTermination`
+record run boundaries explicitly. `x/eval` adds `RunWithOptions` so policy-sensitive
+fixtures can wire `ReplayPolicy`. No core package changed.
 
 ## PR5: Effect-Aware Concurrency
 

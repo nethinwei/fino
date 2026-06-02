@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Execution tape** — `x/replay` now records a structured `Log.Events` tape over
+  public seams in addition to the existing `Log.Model` / `Log.Tools` replay
+  source: model responses, policy decisions, tool executions, suspensions,
+  approvals, resumes, and termination. `Event` uses a string `Kind` plus a
+  kind-specific payload so JSON fixtures stay readable. `Log.Marshal` /
+  `Unmarshal` include `events`; legacy fixtures without that field still load
+  (`Events` is nil) and replay still drives from `Model` / `Tools`. The tape is
+  reproducibility and audit evidence, not proof of business correctness: no
+  exactly-once side effects, durable workflow, or tamper resistance.
+- **RecordingPolicy / ReplayPolicy** — `RecordingPolicy` wraps a `policy.Policy`
+  and records each decision (including policy-system errors) without changing
+  behavior. `ReplayPolicy` replays recorded decisions in order so a replayed run
+  never re-consults human approval, clocks, RBAC, allowlists, or risk scoring; it
+  validates the current request against the recorded one on stable identity
+  (`AgentName`, `ModeName`, `Tool.Name`, raw `Input`), returning a `replay:` error
+  on a fixture mismatch (distinct from a policy deny).
+- **Boundary recorders** — `RecordSuspend`, `RecordApproval`, `RecordResume`, and
+  `RecordTermination` record public run boundaries that no model/tool/policy
+  wrapper can observe. They copy the top-level caller-owned slices so later
+  replacement of a caller-held element cannot rewrite the tape (nested user-owned
+  data such as `message.Block` content or `tool.Info.Metadata` is not deep-copied),
+  and never change runner control flow.
+- **eval.RunWithOptions** — `x/eval` gains `RunWithOptions(ctx, c, opts...)` so a
+  policy-sensitive case can wire `runner.WithPolicy(&replay.ReplayPolicy{Log: c.Log})`
+  without changing the `Case` shape. `Run` delegates to it with no extra options.
+
 ## [0.4.0] - 2026-06-02
 
 ### Added
