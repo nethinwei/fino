@@ -241,8 +241,8 @@ func TestStreamParallelEventsAndBatch(t *testing.T) {
 	tools := []tool.Tool{mkTool("t0"), mkTool("t1")}
 	m := &streamOnlyModel{
 		turns: [][]model.Event{
-			{model.FinalMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
-			{model.FinalMessage{Message: message.Assistant(message.NewText("done"))}},
+			{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
+			{model.TurnMessage{Message: message.Assistant(message.NewText("done"))}},
 		},
 	}
 	r, err := New(m, WithMaxConcurrency(2))

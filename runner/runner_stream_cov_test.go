@@ -27,7 +27,7 @@ func echoTool(t *testing.T, name string) tool.Tool {
 // parallel streaming branch (streamToolCallsParallel).
 func TestStreamParallelPolicyDenial(t *testing.T) {
 	m := &streamOnlyModel{turns: [][]model.Event{
-		{model.FinalMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
+		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
 	}}
 	r, err := New(m, WithMaxConcurrency(2), WithPolicy(denyPolicy{}))
 	if err != nil {
@@ -54,7 +54,7 @@ func TestStreamParallelToolError(t *testing.T) {
 		return "", boom
 	})
 	m := &streamOnlyModel{turns: [][]model.Event{
-		{model.FinalMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
+		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
 	}}
 	r, err := New(m, WithMaxConcurrency(2))
 	if err != nil {
@@ -82,11 +82,11 @@ func TestStreamParallelHandoff(t *testing.T) {
 	source, _ := agent.New("source", agent.WithMode(srcMode), agent.WithDefaultMode("default"))
 
 	m := &streamOnlyModel{turns: [][]model.Event{
-		{model.FinalMessage{Message: message.Assistant(
+		{model.TurnMessage{Message: message.Assistant(
 			message.NewToolUse("c0", "echo", json.RawMessage(`{"text":"x"}`)),
 			message.NewToolUse("c1", "handoff_to_target", json.RawMessage(`{}`)),
 		)}},
-		{model.FinalMessage{Message: message.Assistant(message.NewText("from target"))}},
+		{model.TurnMessage{Message: message.Assistant(message.NewText("from target"))}},
 	}}
 	r, err := New(m, WithMaxConcurrency(2))
 	if err != nil {
@@ -114,7 +114,7 @@ func TestStreamSerialToolError(t *testing.T) {
 		return "", boom
 	})
 	m := &streamOnlyModel{turns: [][]model.Event{
-		{model.FinalMessage{Message: message.Assistant(message.NewToolUse("c0", "echo", json.RawMessage(`{"text":"x"}`)))}},
+		{model.TurnMessage{Message: message.Assistant(message.NewToolUse("c0", "echo", json.RawMessage(`{"text":"x"}`)))}},
 	}}
 	r, err := New(m)
 	if err != nil {
@@ -136,8 +136,8 @@ func TestStreamSerialToolError(t *testing.T) {
 // parallel streaming path: breaking mid-stream must end iteration cleanly.
 func TestStreamParallelConsumerStops(t *testing.T) {
 	m := &streamOnlyModel{turns: [][]model.Event{
-		{model.FinalMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
-		{model.FinalMessage{Message: message.Assistant(message.NewText("done"))}},
+		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "t0"), toolUse("c1", "t1"))}},
+		{model.TurnMessage{Message: message.Assistant(message.NewText("done"))}},
 	}}
 	r, err := New(m, WithMaxConcurrency(2))
 	if err != nil {

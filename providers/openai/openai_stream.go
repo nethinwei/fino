@@ -33,7 +33,7 @@ type streamToolCall struct {
 
 // Stream consumes the OpenAI/DeepSeek SSE response, yielding a ContentBlockDelta
 // (thinking) per reasoning fragment, a TextDelta per content fragment, and a
-// single FinalMessage assembled from accumulated reasoning, text, and tool
+// single TurnMessage assembled from accumulated reasoning, text, and tool
 // calls. Terminal errors are yielded as model.StreamError alongside a non-nil
 // iterator error.
 func (m *Model) Stream(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...model.Option) iter.Seq2[model.Event, error] {
@@ -45,7 +45,7 @@ func (m *Model) Stream(ctx context.Context, messages []message.Message, tools []
 		}
 		defer resp.Body.Close()
 		acc := &accumulator{idx: map[int]int{}}
-		final := func() model.Event { return model.FinalMessage{Message: acc.finalMessage()} }
+		final := func() model.Event { return model.TurnMessage{Message: acc.finalMessage()} }
 		sse.Stream(resp.Body, acc.handle, final)(yield)
 	}
 }

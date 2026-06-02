@@ -98,7 +98,7 @@ func (m *propModel) Stream(ctx context.Context, messages []message.Message, tool
 			yield(model.StreamError{Err: err}, err)
 			return
 		}
-		yield(model.FinalMessage{Message: *msg}, nil)
+		yield(model.TurnMessage{Message: *msg}, nil)
 	}
 }
 

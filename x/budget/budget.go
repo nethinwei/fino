@@ -89,8 +89,8 @@ func (m *Model) Stream(ctx context.Context, msgs []message.Message, tools []tool
 				yield(ev, err)
 				return
 			}
-			if fm, ok := ev.(model.FinalMessage); ok {
-				m.add(m.Cost(&fm.Message))
+			if tm, ok := ev.(model.TurnMessage); ok {
+				m.add(m.Cost(&tm.Message))
 			}
 			if !yield(ev, nil) {
 				return

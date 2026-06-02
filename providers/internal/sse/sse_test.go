@@ -34,7 +34,7 @@ func TestStreamEmitsEventsThenFinalAndStopsOnDone(t *testing.T) {
 		}
 		return []model.Event{model.TextDelta{Text: p}}, false, nil
 	}
-	final := func() model.Event { return model.FinalMessage{} }
+	final := func() model.Event { return model.TurnMessage{} }
 
 	events, err := collect(body, handle, final)
 	if err != nil {
@@ -49,8 +49,8 @@ func TestStreamEmitsEventsThenFinalAndStopsOnDone(t *testing.T) {
 	if d, ok := events[1].(model.TextDelta); !ok || d.Text != "b" {
 		t.Fatalf("event[1] = %+v, want TextDelta b", events[1])
 	}
-	if _, ok := events[2].(model.FinalMessage); !ok {
-		t.Fatalf("event[2] = %+v, want FinalMessage", events[2])
+	if _, ok := events[2].(model.TurnMessage); !ok {
+		t.Fatalf("event[2] = %+v, want TurnMessage", events[2])
 	}
 }
 
@@ -63,7 +63,7 @@ func TestStreamHandleErrorYieldsStreamError(t *testing.T) {
 		}
 		return []model.Event{model.TextDelta{Text: p}}, false, nil
 	}
-	final := func() model.Event { finalCalled = true; return model.FinalMessage{} }
+	final := func() model.Event { finalCalled = true; return model.TurnMessage{} }
 
 	events, err := collect("data: ok\ndata: boom\ndata: after\n", handle, final)
 	if !errors.Is(err, wantErr) {
@@ -83,7 +83,7 @@ func TestStreamEmptyBodyYieldsOnlyFinal(t *testing.T) {
 		t.Fatalf("handle called for empty body, payload %q", p)
 		return nil, false, nil
 	}
-	final := func() model.Event { return model.FinalMessage{} }
+	final := func() model.Event { return model.TurnMessage{} }
 
 	events, err := collect("", handle, final)
 	if err != nil {
@@ -92,8 +92,8 @@ func TestStreamEmptyBodyYieldsOnlyFinal(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1: %+v", len(events), events)
 	}
-	if _, ok := events[0].(model.FinalMessage); !ok {
-		t.Fatalf("event[0] = %+v, want FinalMessage", events[0])
+	if _, ok := events[0].(model.TurnMessage); !ok {
+		t.Fatalf("event[0] = %+v, want TurnMessage", events[0])
 	}
 }
 
@@ -103,7 +103,7 @@ func TestStreamScannerErrorYieldsStreamError(t *testing.T) {
 	body := "data: " + strings.Repeat("x", scanBufferMax+1)
 	finalCalled := false
 	handle := func(p string) ([]model.Event, bool, error) { return nil, false, nil }
-	final := func() model.Event { finalCalled = true; return model.FinalMessage{} }
+	final := func() model.Event { finalCalled = true; return model.TurnMessage{} }
 
 	events, err := collect(body, handle, final)
 	if err == nil {

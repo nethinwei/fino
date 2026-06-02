@@ -17,7 +17,12 @@ type Model interface {
 	// Generate produces a single model response synchronously.
 	Generate(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...Option) (*message.Message, error)
 	// Stream produces a sequence of semantic events from the model. The
-	// iterator must yield a FinalMessage event to signal the end of a turn.
+	// iterator must yield exactly one TurnMessage as the final event to signal
+	// the end of the turn, and must not yield FinalMessage (FinalMessage is a
+	// Runner-only, run-terminal event). No further events may follow the
+	// TurnMessage. The Runner treats a missing TurnMessage, a second
+	// TurnMessage, a post-TurnMessage event, or any FinalMessage as a contract
+	// violation (runner.ErrStreamContract).
 	Stream(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...Option) iter.Seq2[Event, error]
 }
 
@@ -61,8 +66,19 @@ type ToolResult struct {
 // to a target agent.
 type Handoff struct{ Target string }
 
-// FinalMessage carries the complete assembled message at the end of a model
-// turn.
+// TurnMessage carries the complete assembled assistant message produced by one
+// model turn. It is the model layer's terminal event for a single Stream call:
+// a model.Model implementation MUST yield exactly one TurnMessage at the end of
+// its stream and MUST NOT yield FinalMessage. The Runner forwards each turn's
+// TurnMessage to consumers so the full per-turn assistant snapshot (including
+// turns that contain tool calls) is observable and replayable.
+type TurnMessage struct{ Message message.Message }
+
+// FinalMessage marks the terminal result of an entire Runner.Stream run. It is
+// emitted only by the Runner, exactly once, after the final model turn produced
+// a message with no tool calls. Provider model.Model implementations must not
+// yield it (they yield TurnMessage instead); the Runner treats a provider-sent
+// FinalMessage as a contract violation.
 type FinalMessage struct{ Message message.Message }
 
 // StreamError is a terminal error event in the stream. It is always yielded
@@ -76,6 +92,7 @@ func (TextDelta) event()         {}
 func (ToolCall) event()          {}
 func (ToolResult) event()        {}
 func (Handoff) event()           {}
+func (TurnMessage) event()       {}
 func (FinalMessage) event()      {}
 func (StreamError) event()       {}
 

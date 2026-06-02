@@ -89,7 +89,7 @@ func (m RecordingModel) Generate(ctx context.Context, msgs []message.Message, to
 	return out, nil
 }
 
-// Stream forwards events from Next and records the turn's FinalMessage.
+// Stream forwards events from Next and records the turn's TurnMessage.
 func (m RecordingModel) Stream(ctx context.Context, msgs []message.Message, tools []tool.Info, opts ...model.Option) iter.Seq2[model.Event, error] {
 	return func(yield func(model.Event, error) bool) {
 		for ev, err := range m.Next.Stream(ctx, msgs, tools, opts...) {
@@ -97,8 +97,8 @@ func (m RecordingModel) Stream(ctx context.Context, msgs []message.Message, tool
 				yield(ev, err)
 				return
 			}
-			if fm, ok := ev.(model.FinalMessage); ok {
-				m.Log.recordModel(fm.Message)
+			if tm, ok := ev.(model.TurnMessage); ok {
+				m.Log.recordModel(tm.Message)
 			}
 			if !yield(ev, nil) {
 				return
@@ -135,7 +135,8 @@ func (m *ReplayModel) Generate(context.Context, []message.Message, []tool.Info, 
 	return &msg, nil
 }
 
-// Stream yields the next recorded response as a single FinalMessage.
+// Stream yields the next recorded response as a single TurnMessage, honoring the
+// model.Model stream contract.
 func (m *ReplayModel) Stream(context.Context, []message.Message, []tool.Info, ...model.Option) iter.Seq2[model.Event, error] {
 	return func(yield func(model.Event, error) bool) {
 		msg, err := m.next()
@@ -143,7 +144,7 @@ func (m *ReplayModel) Stream(context.Context, []message.Message, []tool.Info, ..
 			yield(model.StreamError{Err: err}, err)
 			return
 		}
-		yield(model.FinalMessage{Message: msg}, nil)
+		yield(model.TurnMessage{Message: msg}, nil)
 	}
 }
 

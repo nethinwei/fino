@@ -31,7 +31,7 @@ type streamEvent struct {
 
 // Stream consumes the Anthropic/DeepSeek SSE response, yielding a
 // ContentBlockDelta (thinking) per reasoning fragment, a TextDelta per text
-// fragment, and a single FinalMessage assembled from accumulated content
+// fragment, and a single TurnMessage assembled from accumulated content
 // blocks. Terminal errors are yielded as model.StreamError alongside a non-nil
 // iterator error.
 func (m *Model) Stream(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...model.Option) iter.Seq2[model.Event, error] {
@@ -43,7 +43,7 @@ func (m *Model) Stream(ctx context.Context, messages []message.Message, tools []
 		}
 		defer resp.Body.Close()
 		acc := &accumulator{idx: map[int]*accBlock{}}
-		final := func() model.Event { return model.FinalMessage{Message: acc.finalMessage()} }
+		final := func() model.Event { return model.TurnMessage{Message: acc.finalMessage()} }
 		sse.Stream(resp.Body, acc.handle, final)(yield)
 	}
 }

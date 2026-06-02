@@ -140,8 +140,10 @@ for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
 		fmt.Printf("← %s\n", e.Result.Text())
 	case model.Handoff:
 		fmt.Printf("⇄ handoff to %s\n", e.Target)
+	case model.TurnMessage:
+		// complete assistant snapshot for each model turn
 	case model.FinalMessage:
-		// complete message snapshot for the turn
+		// run-terminal result (emitted once, by the Runner)
 	}
 }
 ```

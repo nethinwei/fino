@@ -140,8 +140,10 @@ for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
 		fmt.Printf("← %s\n", e.Result.Text())
 	case model.Handoff:
 		fmt.Printf("⇄ 转给 %s\n", e.Target)
+	case model.TurnMessage:
+		// 每个模型 turn 的完整 assistant 快照
 	case model.FinalMessage:
-		// 本轮完整的消息快照
+		// 整个 run 的终态结果（由 Runner 发出，仅一次）
 	}
 }
 ```

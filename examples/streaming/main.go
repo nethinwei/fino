@@ -99,8 +99,12 @@ func (r *renderer) render(ev model.Event) {
 	case model.ToolResult:
 		fmt.Fprintf(r.out, "[tool result] %s -> %s\n", e.Name, e.Result.Text())
 		r.out.Flush()
+	case model.TurnMessage:
+		// Per-turn assistant snapshot; text already streamed via TextDelta, so
+		// just close the current line at the turn boundary.
+		r.endText()
 	case model.FinalMessage:
-		// Text already streamed via TextDelta; nothing extra to print.
+		// Runner's run-terminal event; nothing extra to print.
 	}
 }
 
