@@ -369,7 +369,7 @@ return
 需要并行工具执行的用户可以在单个 Tool 内部自行并发，或通过显式 Runner 选项 `runner.WithMaxConcurrency(n)` opt-in。该选项只影响单个工具批次（同一模型响应中的多个 tool_use）内的执行：
 
 - `n <= 1`（默认）：维持串行行为，无任何新增语义或并发安全要求。
-- `n > 1`：单批次内最多 `n` 个工具并发执行。
+- `n > 1`：并发上界而非强制开关。**当且仅当该批每个工具都声明 `tool.Effects.ParallelSafe` 时**，单批次内最多 `n` 个工具并发执行；只要有一个工具未声明，整批退回串行。Runner 只认显式 `ParallelSafe`，不从 `ReadOnly`/`Idempotent`/`Destructive` 等字段推断并发安全。
 
 并行模式保留以下确定性，把不可预测性降到最低：
 
@@ -380,7 +380,7 @@ return
 - **handoff 末位生效**：若同一批次包含多个 handoff 工具，Runner 在收集完全部结果后按调用顺序应用切换，最后一个 handoff 生效，与串行覆盖语义一致。
 - **流式事件**：所有事件仍只在迭代器所在的单一 goroutine 上产生。`ToolCall` 事件按调用顺序发出，`ToolResult` 事件按完成顺序发出，`Handoff` 事件在批次结束后发出。
 
-开启 `n > 1` 后，用户工具必须可安全并发执行。
+因此 `n > 1` 只对全批显式声明 `ParallelSafe` 的工具生效；未声明或混合批次保持串行，zero-value `Effects` 保守安全。声明 `ParallelSafe` 的工具作者负责保证其并发安全。
 
 ### 消息历史与 system 指令
 
@@ -419,20 +419,33 @@ type Request struct {
     Input     json.RawMessage
 }
 
+type DecisionKind uint8
+
+const (
+    DecisionUnspecified DecisionKind = iota // 零值：回退到旧 Allow 布尔
+    DecisionAllow                           // 允许执行
+    DecisionDeny                            // 拒绝，Runner 返回 ToolDeniedError
+    DecisionSuspend                         // 挂起待人工审批（仅 Run；Stream 降级为 deny）
+)
+
 type Decision struct {
-    Allow  bool
+    Kind   DecisionKind // 新代码设置 Kind
+    Allow  bool         // 软弃用：仅当 Kind==DecisionUnspecified 时读取
     Reason string
 }
 ```
 
 用户可以用自己的 Policy 实现确认、白名单、角色检查、审计日志或拒绝规则。
 
-Policy 返回值语义：
+Policy 返回值语义（`Decision.ResolvedKind()` 解析有效决策）：
 
-- `Decision{Allow:false}` 表示策略正常拒绝工具调用，Runner 返回 `ToolDeniedError`，可通过 `errors.As` 判断。
+- `DecisionAllow`：允许工具执行。
+- `DecisionDeny`：策略正常拒绝，Runner 返回 `ToolDeniedError`，可通过 `errors.As` 判断。
+- `DecisionSuspend`：halt 当前批次等待人工审批。`Run` 返回 `Result{Suspended:true, PendingCalls:…}`（非错误终止，不触发 OnError）；`Stream` 无挂起出口，降级为 `ToolDeniedError`。完整审批恢复见 §"人工确认和恢复"。
 - `error != nil` 表示策略自身失败，例如远程策略服务超时。Runner 将其作为运行时错误返回，不等同于拒绝。
+- 迁移：`Kind==DecisionUnspecified`（零值）时回退到旧 `Allow` 布尔（true→Allow，false→Deny），既有二态 Policy 不变。
 
-这样应用可以区分“安全策略拒绝”和“策略系统故障”。
+这样应用可以区分“安全策略拒绝”“挂起待人工审批”和“策略系统故障”。
 
 ### Hooks
 
@@ -531,6 +544,8 @@ Provider 适配器负责把原生流翻译成 delta/content-block 事件，并�
 
 `content block start/delta/stop` 是保留消息快照能力的必要事件。即使第一版 provider 适配器只产生 `text delta` 和 `TurnMessage`，核心事件模型也必须保留这些事件类型。
 
+Stream 没有挂起出口：它返回 `iter.Seq2[Event, error]`，`FinalMessage` 只用于无工具调用的终态 turn。因此 Policy 的 `DecisionSuspend` 在 Stream 路径降级为 `ToolDeniedError`（运行期终止错误），不引入新事件类型；完整的 suspend 与审批恢复语义仅在 `Run` / `ResumeApproved` 路径。见 `docs/spec/loop-semantics.md` §5。
+
 ### 错误类型
 
 Runner 暴露可判别错误类型，方便用户用 `errors.Is` 或 `errors.As` 做条件分支。
@@ -542,6 +557,10 @@ Runner 暴露可判别错误类型，方便用户用 `errors.Is` 或 `errors.As`
 - `ErrSystemMessageInHistory`
 - `ErrToolDenied`（sentinel，由 `ToolDeniedError.Unwrap` 暴露）
 - `ErrStreamContract`（仅 Stream：`model.Stream` 违反 `TurnMessage`/`FinalMessage` 事件契约）
+- `ErrInvalidToolCallID` / `ErrDuplicateToolCallID`（tool_use ID 为空或批内重复，在授权/执行前 fail-fast）
+- `ErrNotSuspended`（`Result.SuspendedRun` 在未挂起的 Result 上调用）
+- `ErrInvalidApproval`（sentinel，由 `ApprovalError.Unwrap` 暴露：审批集不匹配挂起调用，或 SuspendedRun 快照非法）
+- `ErrResumeAgentMismatch`（`ResumeApproved` 传入的 agent 与挂起时的 `LastAgentName` 不符）
 
 `ToolDeniedError` 携带 `policy.Decision` 和工具信息，适合 UI 展示拒绝原因；用 `errors.Is(err, ErrToolDenied)` 判别，`errors.As` 取细节。`ErrStreamContract` 见 §Streaming 的事件分层。
 
@@ -735,11 +754,11 @@ State = (agent, mode, history, turn)
 
 ```text
 serial   (maxConcurrency ≤ 1) : resolve→authorize→execute 按调用序逐个完成
-parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至多 k 并发；
+parallel (maxConcurrency = k>1 且全批声明 ParallelSafe): authorize 仍按调用序串行；execute 至多 k 并发；
                                  结果按调用序写回；首错（按调用序）取消同批其余并返回
 ```
 
-该等价依赖工具独立性假设。未来 `tool.Effects.ParallelSafe` 会把该假设显式化；在此之前，用户启用 `WithMaxConcurrency` 时必须保证工具并发安全。
+该等价依赖工具独立性假设，现已由 `tool.Effects.ParallelSafe` 显式化：Runner 仅在 `maxConcurrency>1` 且该批每个工具都声明 `ParallelSafe` 时进入并行路径，否则整批串行（zero-value `Effects` 保守安全）。详见 `docs/spec/loop-semantics.md` §4.2 与不变量 I6。
 
 ## 循环不变量
 

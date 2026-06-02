@@ -97,7 +97,7 @@ State = (agent, mode, history, turn)
                    - 该 dangling 批每个 tool_use.ID 非空且批内唯一（否则 wrap(ErrInvalidToolCallID/ErrDuplicateToolCallID)；
                      与原批 authorizeBatch 步骤0 同一不变量，护 I14）
                    - PendingCalls 非空（空 pending 会退化为无审批盲恢复，拒绝）
-                   - 每个 PendingCall.Call.ID 须出现在该批 tool_use 中，且不重复
+                   - 每个 PendingCall.Call.ID 须出现在该批 tool_use 中，且不重复；其 Name 与 Input（字节级）须与该批同 ID 的 tool_use 一致（否则 wrap(ErrInvalidApproval)：审批对象必须等于将执行的调用）
                    - approvals 对每个 PendingCall 恰好一个，无未知 CallID、无重复
                    校验失败 ⟶ 返回 ApprovalError / wrap(ErrInvalidApproval)（循环前；不触发 OnError）
              步骤1b mode 锁定: opts 不得 override mode（cfg.modeName 必须 == suspended.LastMode），
@@ -266,10 +266,10 @@ I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 
 `[T-SUSPEND]` 产出的挂起 `Result` 经 `Result.SuspendedRun()` 提取为值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls, RunID}`（纯数据，不含活对象引用），由调用方自行持久化，再连同活的 agent 一起传入 `ResumeApproved`（见 §3 `[T-RESUME]`）。这是一等审批恢复，与 §7.2 的安全边界恢复是两套不同的转移：
 
 - **agent 上下文**：挂起前可能已发生 handoff，活跃 agent 不再是根 agent。`SuspendedRun` 只记录 `LastAgentName`/`LastMode`（纯数据，不持有活对象引用）；活 agent 是调用方重建的代码，由其显式传入。能否 JSON 序列化取决于 `PendingCall` 内 `tool.Info.Metadata` 是否可 marshal，核心不清洗。`ResumeApproved` 校验传入 agent 的 `Name()` 与 `LastAgentName` 一致，避免在错误 agent 上下文中 resolve 工具。`PendingToolCall` 不重复携带 per-call agent/mode（同批必属单一 agent+mode）。
-- **审批裁决**：`Approval{CallID, Approved, Reason}` 按 `CallID` 绑定到挂起调用。批准→执行工具；拒绝→写入 `IsError=true` 的 `rejected: <Reason>` 结果，使模型可见并据此调整（拒绝是模型可见的结果，不是隐藏控制流）。
+- **审批裁决**：`Approval{CallID, Approved, Reason}` 按 `CallID` 绑定到挂起调用。批准→执行工具；拒绝→写入 `IsError=true` 的 `rejected: <Reason>` 结果，使模型可见并据此调整（拒绝是模型可见的结果，不是隐藏控制流）。`ResumeApproved` 还校验每个 `PendingCall.Call` 的 `Name`/`Input`（字节级）与该批同 ID 的 dangling `tool_use` 一致——审批对象必须等于将执行的调用（执行参数取自 `suspended.Messages`），否则 wrap(ErrInvalidApproval)。
 - **不重新授权**：挂起调用已被授权，`ResumeApproved` 不再调用 `Policy.Authorize`（D5）。
 - **幂等键恢复**：`SuspendedRun` 额外携带 `RunID`，`ResumeApproved` 用 `suspended.RunID` 还原 `runConfig.RunID`（恒覆盖 resume 时传入的 `WithRunID`），使被批准/原 Allow 的调用获得与原始运行相同的 `tool.ExecutionContext.IdempotencyKey`（I13）。
-- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。`InputHash`/防篡改、跨进程 exactly-once、Stream 的 suspend/resume 事件均不在核心内（属 `x/` 或应用层）。
+- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。核心校验*快照内部一致性*（PendingCalls 的 Name/Input 不与 Messages 分叉，见上）与 *CallID 良构*（I14）；但*防篡改 digest*（抵御 PendingCalls 与 Messages 被同时一致改写——其信任根属应用层的可信审批通道）、跨进程 exactly-once、Stream 的 suspend/resume 事件仍不在核心内（属 `x/` 或应用层）。
 
 `x/recover` 的 `Snapshot` 仅承载安全边界恢复（I10）；审批恢复由 `runner.ResumeApproved` 一等承载，二者职责不重叠。
 
