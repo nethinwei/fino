@@ -37,6 +37,10 @@ func (r *Runner) streamLoop(ctx context.Context, yield func(model.Event, error) 
 		r.emitErr(ctx, yield, err)
 		return
 	}
+	ctx, ok := r.resumePendingToolsStream(ctx, st, yield)
+	if !ok {
+		return
+	}
 	for turn := 0; turn < r.maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			r.emitErr(ctx, yield, err)
@@ -58,6 +62,26 @@ func (r *Runner) streamLoop(ctx context.Context, yield func(model.Event, error) 
 		}
 	}
 	r.emitErr(ctx, yield, fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns))
+}
+
+// resumePendingToolsStream is the Stream counterpart of resumePendingTools: when
+// the resume-from-pending seam is enabled and the input history's tail carries
+// pending tool calls, it executes them (emitting ToolCall/ToolResult events)
+// before the first model turn. The bool result is false when iteration should
+// stop. It is a no-op when the seam is off or there is nothing pending.
+func (r *Runner) resumePendingToolsStream(ctx context.Context, st *runState, yield func(model.Event, error) bool) (context.Context, bool) {
+	if !st.cfg.resumePending {
+		return ctx, true
+	}
+	pending := pendingToolUses(st.history)
+	if len(pending) == 0 {
+		return ctx, true
+	}
+	if err := ctx.Err(); err != nil {
+		r.emitErr(ctx, yield, err)
+		return ctx, false
+	}
+	return r.streamToolCalls(ctx, st, pending, yield)
 }
 
 // streamGenerate builds the model input, consumes the model's event stream
