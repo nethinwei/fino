@@ -105,6 +105,54 @@ func TestRecordBoundaryEventsCopySlices(t *testing.T) {
 	}
 }
 
+// TestRecordingToolCapturesCallID proves RecordingTool populates ToolRecord.CallID
+// from the run-scoped tool.ExecutionContext the Runner injects, and that the
+// CallID survives a JSON round-trip.
+func TestRecordingToolCapturesCallID(t *testing.T) {
+	log := &replay.Log{}
+	recModel := replay.RecordingModel{Next: &fakeProvider{resp: script()}, Log: log}
+	recAgent := buildAgent(t, replay.RecordingTool(searchTool(t, nil), log))
+
+	r, err := runner.New(recModel)
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	if _, err := r.Run(context.Background(), recAgent, runner.Text("find go"), runner.WithRunID("run_x")); err != nil {
+		t.Fatalf("record Run: %v", err)
+	}
+	if len(log.Tools) != 1 {
+		t.Fatalf("recorded tools = %d, want 1", len(log.Tools))
+	}
+	if log.Tools[0].CallID != "c1" {
+		t.Fatalf("ToolRecord.CallID = %q, want c1", log.Tools[0].CallID)
+	}
+
+	data, err := log.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := replay.Unmarshal(data)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Tools[0].CallID != "c1" {
+		t.Fatalf("round-trip CallID = %q, want c1", got.Tools[0].CallID)
+	}
+}
+
+// TestRecordingToolLegacyFixtureNoCallID proves a fixture written before the
+// CallID field loads with CallID empty.
+func TestRecordingToolLegacyFixtureNoCallID(t *testing.T) {
+	legacy := []byte(`{"model":[],"tools":[{"name":"search","input":{"query":"go"},"result":{"Content":null,"IsError":false}}]}`)
+	got, err := replay.Unmarshal(legacy)
+	if err != nil {
+		t.Fatalf("Unmarshal legacy: %v", err)
+	}
+	if len(got.Tools) != 1 || got.Tools[0].CallID != "" {
+		t.Fatalf("legacy CallID = %q, want empty", got.Tools[0].CallID)
+	}
+}
+
 // TestRecordCompletedRunEventOrder pins spec test #1: a completed run records
 // events in order model_response, policy_decision, tool_execution,
 // model_response, termination.

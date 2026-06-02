@@ -127,7 +127,7 @@ authorize(cᵢ)  : policy.Authorize(ctx, req) →
                    ResolvedKind = Deny       ⟶ ToolDeniedError{Tool, Decision}
                    ResolvedKind = Suspend    ⟶ 收集进 pending（批末若有 pending 则 [T-SUSPEND]）
                    ResolvedKind = Allow      ⟶ 进入 executeBatch
-execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)   // 仅成功时 AfterTool
+execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)   // 仅成功时 AfterTool
                  handoff 工具: 记录结果后 switchTo(target)
 ```
 
@@ -156,6 +156,10 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 ```
 
 两种策略对 Runner 协议结果（追加的 `RoleTool` 消息、返回的错误、最终 `State`）必须等价。差异仅限于 §4.1/§4.2 中显式声明的 ctx 作用域语义，以及 §5 中明确规定的 Stream 并行 `ToolResult` 完成序事件。
+
+### 4.3 执行上下文注入（ExecutionContext）
+
+每次 `execute(cᵢ)` 在调用 `BeforeTool` **之前**，由 Runner 用 `runConfig.RunID` 与 `cᵢ.ID` 构造 `tool.ExecutionContext` 注入 `ctx`，使生命周期 hook 与工具本身都能 `tool.ExecutionContextFrom(ctx)` 读取。`IdempotencyKey` 是 `(RunID, ToolCallID)` 的确定性函数（`RunID` 非空时为 `RunID + ":" + ToolCallID`，否则为空），与串行/并行路径无关。`RunID` 由 `runner.WithRunID` 提供，缺省为空（`IdempotencyKey` 同为空，完全向后兼容）。Runner 始终注入（即使 `RunID` 为空，`ToolCallID` 仍被填充）。它是审计与去重提示，不是安全边界：setter 公开，工具不得据其内容做授权判断。
 
 ## 5. 流式（Stream）附加规则
 
@@ -222,6 +226,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 | I9 | ctx 忠实 | `ctx` 取消后不再发生新的 `model.Generate`/`model.Stream` 或 `tool.Run` |
 | I10 | 安全边界恢复完备 | 在 completed turn boundary（history 末尾为 user/tool 消息或无 pending tool_use 的 assistant 消息）上，`(history, mode.Name)` 足以继续运行 |
 | I12 | 审批恢复完备 | `ResumeApproved` 校验通过后，挂起批中**每个** `tool_use` 在追加的单条 `RoleTool` 消息中都有对应 `tool_result`（被批准/原 Allow 的为真实结果，被拒绝的为 `IsError=true` 的 `rejected:` 结果），故续接的 `[T-MODEL]` 观察到一个良构 history |
+| I13 | 幂等键稳定 | `RunID` 非空时，任一 `ToolCallID` 注入的 `IdempotencyKey` 是 `(RunID, ToolCallID)` 的确定性函数，与串行、并行、`ResumeApproved` 执行路径无关 |
 
 ### 7.1 关于 I6（协议轨迹等价）与诱导取消
 
@@ -250,11 +255,12 @@ I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 
 
 ### 7.3 关于 I12（审批恢复完备）
 
-`[T-SUSPEND]` 产出的挂起 `Result` 经 `Result.SuspendedRun()` 提取为值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls}`（纯数据，不含活对象引用），由调用方自行持久化，再连同活的 agent 一起传入 `ResumeApproved`（见 §3 `[T-RESUME]`）。这是一等审批恢复，与 §7.2 的安全边界恢复是两套不同的转移：
+`[T-SUSPEND]` 产出的挂起 `Result` 经 `Result.SuspendedRun()` 提取为值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls, RunID}`（纯数据，不含活对象引用），由调用方自行持久化，再连同活的 agent 一起传入 `ResumeApproved`（见 §3 `[T-RESUME]`）。这是一等审批恢复，与 §7.2 的安全边界恢复是两套不同的转移：
 
 - **agent 上下文**：挂起前可能已发生 handoff，活跃 agent 不再是根 agent。`SuspendedRun` 只记录 `LastAgentName`/`LastMode`（纯数据，不持有活对象引用）；活 agent 是调用方重建的代码，由其显式传入。能否 JSON 序列化取决于 `PendingCall` 内 `tool.Info.Metadata` 是否可 marshal，核心不清洗。`ResumeApproved` 校验传入 agent 的 `Name()` 与 `LastAgentName` 一致，避免在错误 agent 上下文中 resolve 工具。`PendingToolCall` 不重复携带 per-call agent/mode（同批必属单一 agent+mode）。
 - **审批裁决**：`Approval{CallID, Approved, Reason}` 按 `CallID` 绑定到挂起调用。批准→执行工具；拒绝→写入 `IsError=true` 的 `rejected: <Reason>` 结果，使模型可见并据此调整（拒绝是模型可见的结果，不是隐藏控制流）。
 - **不重新授权**：挂起调用已被授权，`ResumeApproved` 不再调用 `Policy.Authorize`（D5）。
+- **幂等键恢复**：`SuspendedRun` 额外携带 `RunID`，`ResumeApproved` 用 `suspended.RunID` 还原 `runConfig.RunID`（恒覆盖 resume 时传入的 `WithRunID`），使被批准/原 Allow 的调用获得与原始运行相同的 `tool.ExecutionContext.IdempotencyKey`（I13）。
 - **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。`InputHash`/防篡改、跨进程 exactly-once、Stream 的 suspend/resume 事件均不在核心内（属 `x/` 或应用层）。
 
 `x/recover` 的 `Snapshot` 仅承载安全边界恢复（I10）；审批恢复由 `runner.ResumeApproved` 一等承载，二者职责不重叠。
