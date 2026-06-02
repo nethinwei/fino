@@ -6,6 +6,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-02
+
+### Added
+
+- **Typed tool effects** — `tool.Effects` and the `tool.WithEffects` option let
+  tool authors declare a tool's effect profile (read-only, idempotent,
+  parallel-safe, destructive, external-write, requires-approval, sensitive
+  input/output) at registration. Effects are surfaced to policies through the
+  existing `policy.Request.Tool` field. Declaration-only: the Runner does not
+  yet change behavior based on Effects (a foundation for effect-aware
+  concurrency and approval in later releases).
+- **Three-state policy (allow / deny / suspend)** — `policy.DecisionKind` adds a
+  `DecisionSuspend` state alongside allow and deny, with a safe
+  `DecisionUnspecified` zero value and `Decision.ResolvedKind()` migration rule.
+  When a policy suspends a tool call, `runner.Run` halts with a
+  `Result{Suspended: true, PendingCalls: [...]}` (see `runner.PendingToolCall`)
+  instead of erroring — `OnError` does not fire. This is the seam for
+  human-in-the-loop approval.
+
+### Changed
+
+- **Authorize-all-before-execute** — the serial tool path now authorizes the
+  whole batch before executing any tool, matching the parallel path. A deny or
+  suspend anywhere in a batch now produces no side effects from earlier calls
+  (strengthens serial/parallel protocol-trace equivalence, I6).
+- **Streaming suspend** — `Runner.Stream` downgrades a suspend decision to a
+  `ToolDeniedError` rather than introducing a new event type; full suspend
+  semantics are available on `Runner.Run`.
+- **Loop semantics** — `docs/spec/loop-semantics.md` gains the `[T-SUSPEND]`
+  transition and invariant I11 (suspend precision), and updates I3/I4/I5.
+
+### Compatibility
+
+- Fully backward compatible. Existing `policy.Policy` implementations returning
+  `Decision{Allow: true/false}` keep working via `ResolvedKind()`; `AllowAll`
+  now returns `Decision{Kind: DecisionAllow}`. Adding `tool.Effects` to
+  `tool.Info` is additive; tools built without `WithEffects` get the
+  conservative zero value.
+
+## [0.2.1] - 2026-06-02
+
 ### Changed
 
 - Tightened reliability claims around replay, recovery, and parallel execution:
@@ -13,6 +54,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   continuation, and protocol-trace equivalence under tool-independence
   assumptions. Full effect-aware approval/resume and execution-tape semantics
   are tracked in the roadmap rather than claimed as shipped behavior.
+- Added `docs/roadmap.md` describing the path toward typed tool effects,
+  suspend/resume, execution tapes, and effect-aware concurrency.
 
 ## [0.2.0] - 2026-06-02
 
@@ -62,5 +105,7 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
+[0.3.0]: https://github.com/nethinwei/fino/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/nethinwei/fino/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nethinwei/fino/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nethinwei/fino/releases/tag/v0.1.0
