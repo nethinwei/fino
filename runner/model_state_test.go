@@ -124,13 +124,14 @@ func (l *eventLog) snapshot() []string {
 // propTool is a programmable tool. okText is its result text; if fail is set it
 // returns an error. It records "run:<name>" into the shared log.
 type propTool struct {
-	name string
-	fail bool
-	log  *eventLog
+	name    string
+	fail    bool
+	effects tool.Effects
+	log     *eventLog
 }
 
 func (t *propTool) Info() tool.Info {
-	return tool.Info{Name: t.name, Description: t.name, InputSchema: emptyObjSchema}
+	return tool.Info{Name: t.name, Description: t.name, InputSchema: emptyObjSchema, Effects: t.effects}
 }
 
 func (t *propTool) Run(ctx context.Context, _ json.RawMessage) (tool.Result, error) {
@@ -177,11 +178,14 @@ const failToolName = "boom"
 // one failing tool, all sharing the given log.
 func buildPropAgent(t *testing.T, log *eventLog) *agent.Agent {
 	t.Helper()
+	// Declared Effects must be inert in PR1: the Runner does not read them, so
+	// every invariant must hold identically whether or not they are set.
+	okEffects := tool.Effects{ReadOnly: true, Idempotent: true, ParallelSafe: true}
 	tools := make([]tool.Tool, 0, len(okToolNames)+1)
 	for _, n := range okToolNames {
-		tools = append(tools, &propTool{name: n, log: log})
+		tools = append(tools, &propTool{name: n, effects: okEffects, log: log})
 	}
-	tools = append(tools, &propTool{name: failToolName, fail: true, log: log})
+	tools = append(tools, &propTool{name: failToolName, fail: true, effects: tool.Effects{Destructive: true, ExternalWrite: true}, log: log})
 	mode, err := agent.NewMode("default", "harness", agent.WithTools(tools...))
 	if err != nil {
 		t.Fatalf("NewMode error: %v", err)

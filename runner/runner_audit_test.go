@@ -149,3 +149,30 @@ func TestPolicyReceivesFullRequest(t *testing.T) {
 		t.Fatalf("Input = %s, want %s", pol.req.Input, `{"text":"go"}`)
 	}
 }
+
+// T8b: a tool's declared Effects are visible to the Policy via
+// policy.Request.Tool.Effects without any change to the policy.Policy interface.
+func TestPolicySeesToolEffects(t *testing.T) {
+	want := tool.Effects{ReadOnly: true, Idempotent: true, ParallelSafe: true}
+	echo, err := tool.NewFunc("echo", "Echo text", func(ctx context.Context, in echoInput) (string, error) {
+		return in.Text, nil
+	}, tool.WithEffects(want))
+	if err != nil {
+		t.Fatalf("NewFunc: %v", err)
+	}
+	m := &scriptedModel{responses: []message.Message{
+		message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"go"}`))),
+		message.Assistant(message.NewText("done")),
+	}}
+	pol := &recordPolicy{}
+	r, err := New(m, WithPolicy(pol))
+	if err != nil {
+		t.Fatalf("New runner: %v", err)
+	}
+	if _, err := r.Run(context.Background(), testAgent(t, echo), Text("hi")); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := pol.req.Tool.Effects; got != want {
+		t.Fatalf("Tool.Effects = %+v, want %+v", got, want)
+	}
+}

@@ -20,6 +20,22 @@ type Info struct {
 	Description string
 	InputSchema json.RawMessage
 	Metadata    map[string]any
+	Effects     Effects
+}
+
+// Effects declares the effect profile of a tool. The zero value means
+// "unspecified" — the runtime MUST treat unspecified as conservative (not
+// safe). A field being false does NOT mean the tool lacks that property; it
+// means the tool has not declared it.
+type Effects struct {
+	ReadOnly         bool // Tool performs no external writes.
+	Idempotent       bool // Repeated calls with the same input have no additional effect.
+	ParallelSafe     bool // Safe to run concurrently with other ParallelSafe tools.
+	Destructive      bool // Tool may irreversibly destroy data or resources.
+	ExternalWrite    bool // Tool writes to external systems (APIs, filesystems, DBs).
+	RequiresApproval bool // Tool should be gated by human approval before execution.
+	SensitiveInput   bool // Tool input may contain secrets or PII.
+	SensitiveOutput  bool // Tool output may contain secrets or PII.
 }
 
 // Result is the output of a tool execution. Content uses message blocks so
@@ -61,12 +77,19 @@ type Option func(*funcConfig)
 type funcConfig struct {
 	schema   json.RawMessage
 	metadata map[string]any
+	effects  Effects
 }
 
 // WithSchema overrides the inferred JSON Schema for a function tool's input.
 // The schema is deep-copied to prevent mutation by the caller.
 func WithSchema(schema json.RawMessage) Option {
 	return func(c *funcConfig) { c.schema = append(json.RawMessage(nil), schema...) }
+}
+
+// WithEffects sets the effect declaration for a function tool. Omitting it
+// leaves Effects at its zero value (unspecified/conservative).
+func WithEffects(e Effects) Option {
+	return func(c *funcConfig) { c.effects = e }
 }
 
 // WithMetadata attaches a key-value pair to the tool's metadata.
@@ -110,7 +133,7 @@ func NewFunc[T any, R FuncReturn](name, description string, fn func(context.Cont
 		schema = generated
 	}
 	return &funcTool[T, R]{
-		info: Info{Name: name, Description: description, InputSchema: schema, Metadata: cfg.metadata},
+		info: Info{Name: name, Description: description, InputSchema: schema, Metadata: cfg.metadata, Effects: cfg.effects},
 		fn:   fn,
 	}, nil
 }
