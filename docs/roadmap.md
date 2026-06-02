@@ -55,7 +55,7 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 | PR2 | Three-state policy | Add Allow / Deny / Suspend decisions and suspended `runner.Result`. | v0.3.0 |
 | PR3 | Approved resume | Add `SuspendedRun`, `PendingToolCall`, `Approval`, and `Runner.ResumeApproved`. | v0.4.0 |
 | PR4 ✅ | Execution tape | Define recorded model, policy, tool, suspension, resume, and termination events. | v0.5.0 |
-| PR5 | Effect-aware concurrency | Make `WithMaxConcurrency` honor `Effects.ParallelSafe` by default. | v0.6.0 |
+| PR5 ✅ | Effect-aware concurrency | Make `WithMaxConcurrency` honor `Effects.ParallelSafe` by default. | v0.6.0 |
 | PR6 | Idempotency boundary | Define idempotency keys and retry constraints without automatic write retries. | v0.6.0 |
 | PR7 | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
 
@@ -162,17 +162,19 @@ fixtures can wire `ReplayPolicy`. No core package changed.
 
 ## PR5: Effect-Aware Concurrency
 
-After `tool.Effects` exists, `WithMaxConcurrency` should default to conservative
-scheduling:
+Delivered as conservative scheduling driven only by the explicit
+`ParallelSafe` declaration:
 
 | Tool batch | Scheduling |
 | --- | --- |
 | All tools declare `ParallelSafe` | Execute concurrently, preserve result order. |
 | Any tool lacks `ParallelSafe` | Execute the whole batch serially. |
 | Any tool suspends | Execute none; return suspended. |
-| Destructive tools | Prefer serial unless a future API makes stronger guarantees explicit. |
+| Destructive tools | Prefer serial by not declaring `ParallelSafe`; Runner does not special-case `Destructive`. |
 
-No batch partitioning in the first version.
+No batch partitioning in the first version. `WithMaxConcurrency` is an upper
+bound, not a force-parallel switch: the Runner only enters the parallel path when
+the whole selected batch explicitly opts into `ParallelSafe`.
 
 ## PR6: Idempotency And Retry Boundary
 

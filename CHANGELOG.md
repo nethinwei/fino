@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Effect-aware concurrency** — `runner.WithMaxConcurrency(n > 1)` now treats
+  concurrency as an upper bound gated by `tool.Effects.ParallelSafe`: a tool-call
+  batch only runs concurrently when every selected tool explicitly declares
+  `ParallelSafe`; otherwise the whole batch falls back to serial execution.
+  Zero-value `Effects` remains conservative, and the Runner does not infer
+  safety from `ReadOnly`, `Idempotent`, `ExternalWrite`, or `Destructive`.
+- **Serial `Stream` now authorizes the whole batch before executing** — the
+  serial streaming path previously authorized each tool just before running it,
+  so an earlier tool could execute and emit `ToolCall`/`ToolResult` events before
+  a later call in the same batch was denied or suspended. It now authorizes the
+  entire batch first (matching `Run` and loop-semantics §4.1/I6): if any call is
+  denied or suspended, no tool in the batch executes and no `ToolCall` event is
+  emitted.
+
 ## [0.5.0] - 2026-06-02
 
 ### Added

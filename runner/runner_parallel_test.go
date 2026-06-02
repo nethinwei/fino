@@ -28,21 +28,151 @@ func toolUse(id, name string) message.Block {
 	return message.NewToolUse(id, name, json.RawMessage(`{"text":"x"}`))
 }
 
+var parallelSafeEffects = tool.Effects{ParallelSafe: true}
+
+func parallelSafeTool(t *testing.T, name, description string, fn func(context.Context, echoInput) (string, error)) tool.Tool {
+	t.Helper()
+	tl, err := tool.NewFunc(name, description, fn, tool.WithEffects(parallelSafeEffects))
+	if err != nil {
+		t.Fatalf("NewFunc %q error: %v", name, err)
+	}
+	return tl
+}
+
+type effectHandoffTool struct {
+	agent.HandoffTool
+	effects tool.Effects
+}
+
+func (h effectHandoffTool) Info() tool.Info {
+	info := h.HandoffTool.Info()
+	info.Effects = h.effects
+	return info
+}
+
+func parallelSafeHandoff(t *testing.T, handoff tool.Tool) tool.Tool {
+	t.Helper()
+	h, ok := handoff.(agent.HandoffTool)
+	if !ok {
+		t.Fatalf("%T is not a handoff tool", handoff)
+	}
+	return effectHandoffTool{HandoffTool: h, effects: parallelSafeEffects}
+}
+
+func TestRunMaxConcurrencyFallsBackToSerialForUnspecifiedEffects(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	})
+
+	first, err := tool.NewFunc("first", "first", func(ctx context.Context, in echoInput) (string, error) {
+		close(firstStarted)
+		<-releaseFirst
+		return "first", nil
+	})
+	if err != nil {
+		t.Fatalf("NewFunc first error: %v", err)
+	}
+	second, err := tool.NewFunc("second", "second", func(ctx context.Context, in echoInput) (string, error) {
+		secondStarted <- struct{}{}
+		return "second", nil
+	})
+	if err != nil {
+		t.Fatalf("NewFunc second error: %v", err)
+	}
+
+	m := batchThenFinal([]message.Block{toolUse("c0", "first"), toolUse("c1", "second")}, "done")
+	r, err := New(m, WithMaxConcurrency(2))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := r.Run(context.Background(), testAgent(t, first, second), Text("hi"))
+		done <- runErr
+	}()
+
+	<-firstStarted
+	select {
+	case <-secondStarted:
+		t.Fatal("second tool started before first completed; zero-value effects must force serial execution")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if err := <-done; err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+}
+
+func TestRunMaxConcurrencyFallsBackToSerialForMixedParallelSafety(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	})
+
+	first := parallelSafeTool(t, "first", "first", func(ctx context.Context, in echoInput) (string, error) {
+		close(firstStarted)
+		<-releaseFirst
+		return "first", nil
+	})
+	second, err := tool.NewFunc("second", "second", func(ctx context.Context, in echoInput) (string, error) {
+		secondStarted <- struct{}{}
+		return "second", nil
+	})
+	if err != nil {
+		t.Fatalf("NewFunc second error: %v", err)
+	}
+
+	m := batchThenFinal([]message.Block{toolUse("c0", "first"), toolUse("c1", "second")}, "done")
+	r, err := New(m, WithMaxConcurrency(2))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := r.Run(context.Background(), testAgent(t, first, second), Text("hi"))
+		done <- runErr
+	}()
+
+	<-firstStarted
+	select {
+	case <-secondStarted:
+		t.Fatal("mixed safe/unsafe batch ran concurrently; whole batch must be serial")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if err := <-done; err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+}
+
 func TestRunParallelExecutesConcurrently(t *testing.T) {
 	const n = 3
 	var started sync.WaitGroup
 	started.Add(n)
 	release := make(chan struct{})
 	mkTool := func(name string) tool.Tool {
-		tl, err := tool.NewFunc(name, "block", func(ctx context.Context, in echoInput) (string, error) {
+		return parallelSafeTool(t, name, "block", func(ctx context.Context, in echoInput) (string, error) {
 			started.Done()
 			<-release
 			return name, nil
 		})
-		if err != nil {
-			t.Fatalf("NewFunc error: %v", err)
-		}
-		return tl
 	}
 	tools := []tool.Tool{mkTool("t0"), mkTool("t1"), mkTool("t2")}
 	m := batchThenFinal([]message.Block{toolUse("c0", "t0"), toolUse("c1", "t1"), toolUse("c2", "t2")}, "done")
@@ -76,14 +206,10 @@ func TestRunParallelExecutesConcurrently(t *testing.T) {
 func TestRunParallelPreservesResultOrder(t *testing.T) {
 	// c0 sleeps longest so it finishes last, yet its result must stay first.
 	mkTool := func(name string, delay time.Duration) tool.Tool {
-		tl, err := tool.NewFunc(name, "delay", func(ctx context.Context, in echoInput) (string, error) {
+		return parallelSafeTool(t, name, "delay", func(ctx context.Context, in echoInput) (string, error) {
 			time.Sleep(delay)
 			return name, nil
 		})
-		if err != nil {
-			t.Fatalf("NewFunc error: %v", err)
-		}
-		return tl
 	}
 	tools := []tool.Tool{
 		mkTool("t0", 30*time.Millisecond),
@@ -119,7 +245,7 @@ func TestRunParallelBoundedConcurrency(t *testing.T) {
 	const limit = 2
 	var inflight, maxSeen int64
 	mkTool := func(name string) tool.Tool {
-		tl, err := tool.NewFunc(name, "track", func(ctx context.Context, in echoInput) (string, error) {
+		return parallelSafeTool(t, name, "track", func(ctx context.Context, in echoInput) (string, error) {
 			cur := atomic.AddInt64(&inflight, 1)
 			for {
 				prev := atomic.LoadInt64(&maxSeen)
@@ -131,10 +257,6 @@ func TestRunParallelBoundedConcurrency(t *testing.T) {
 			atomic.AddInt64(&inflight, -1)
 			return name, nil
 		})
-		if err != nil {
-			t.Fatalf("NewFunc error: %v", err)
-		}
-		return tl
 	}
 	tools := []tool.Tool{mkTool("t0"), mkTool("t1"), mkTool("t2"), mkTool("t3")}
 	m := batchThenFinal([]message.Block{
@@ -157,10 +279,9 @@ func TestRunParallelBoundedConcurrency(t *testing.T) {
 
 func TestRunParallelPolicyDenial(t *testing.T) {
 	mkTool := func(name string) tool.Tool {
-		tl, _ := tool.NewFunc(name, "echo", func(ctx context.Context, in echoInput) (string, error) {
+		return parallelSafeTool(t, name, "echo", func(ctx context.Context, in echoInput) (string, error) {
 			return name, nil
 		})
-		return tl
 	}
 	tools := []tool.Tool{mkTool("t0"), mkTool("t1")}
 	m := batchThenFinal([]message.Block{toolUse("c0", "t0"), toolUse("c1", "t1")}, "done")
@@ -178,10 +299,10 @@ func TestRunParallelPolicyDenial(t *testing.T) {
 func TestRunParallelToolErrorFailFast(t *testing.T) {
 	boom := errors.New("boom")
 	var siblingRan atomic.Bool
-	failing, _ := tool.NewFunc("t0", "fail", func(ctx context.Context, in echoInput) (string, error) {
+	failing := parallelSafeTool(t, "t0", "fail", func(ctx context.Context, in echoInput) (string, error) {
 		return "", boom
 	})
-	sibling, _ := tool.NewFunc("t1", "wait", func(ctx context.Context, in echoInput) (string, error) {
+	sibling := parallelSafeTool(t, "t1", "wait", func(ctx context.Context, in echoInput) (string, error) {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -211,6 +332,8 @@ func TestRunParallelHandoffLastWins(t *testing.T) {
 	targetB, _ := agent.New("targetB", agent.WithMode(modeB), agent.WithDefaultMode("default"))
 	handoffA, _ := agent.NewHandoffTool(targetA)
 	handoffB, _ := agent.NewHandoffTool(targetB)
+	handoffA = parallelSafeHandoff(t, handoffA)
+	handoffB = parallelSafeHandoff(t, handoffB)
 	sourceMode, _ := agent.NewMode("default", "source", agent.WithTools(handoffA, handoffB))
 	source, _ := agent.New("source", agent.WithMode(sourceMode), agent.WithDefaultMode("default"))
 
@@ -233,10 +356,9 @@ func TestRunParallelHandoffLastWins(t *testing.T) {
 
 func TestStreamParallelEventsAndBatch(t *testing.T) {
 	mkTool := func(name string) tool.Tool {
-		tl, _ := tool.NewFunc(name, "echo", func(ctx context.Context, in echoInput) (string, error) {
+		return parallelSafeTool(t, name, "echo", func(ctx context.Context, in echoInput) (string, error) {
 			return name, nil
 		})
-		return tl
 	}
 	tools := []tool.Tool{mkTool("t0"), mkTool("t1")}
 	m := &streamOnlyModel{
@@ -270,6 +392,123 @@ func TestStreamParallelEventsAndBatch(t *testing.T) {
 	}
 	if len(callOrder) != 2 || callOrder[0] != "c0" || callOrder[1] != "c1" {
 		t.Fatalf("ToolCall order = %v, want [c0 c1]", callOrder)
+	}
+}
+
+func TestStreamMaxConcurrencyFallsBackToSerialForUnspecifiedEffects(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	})
+
+	first, err := tool.NewFunc("first", "first", func(ctx context.Context, in echoInput) (string, error) {
+		close(firstStarted)
+		<-releaseFirst
+		return "first", nil
+	})
+	if err != nil {
+		t.Fatalf("NewFunc first error: %v", err)
+	}
+	second, err := tool.NewFunc("second", "second", func(ctx context.Context, in echoInput) (string, error) {
+		secondStarted <- struct{}{}
+		return "second", nil
+	})
+	if err != nil {
+		t.Fatalf("NewFunc second error: %v", err)
+	}
+	m := &streamOnlyModel{turns: [][]model.Event{
+		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "first"), toolUse("c1", "second"))}},
+		{model.TurnMessage{Message: message.Assistant(message.NewText("done"))}},
+	}}
+	r, err := New(m, WithMaxConcurrency(2))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var streamErr error
+		for _, err := range r.Stream(context.Background(), testAgent(t, first, second), Text("hi")) {
+			if err != nil {
+				streamErr = err
+			}
+		}
+		done <- streamErr
+	}()
+
+	<-firstStarted
+	select {
+	case <-secondStarted:
+		t.Fatal("second stream tool started before first completed; zero-value effects must force serial execution")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if err := <-done; err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+}
+
+func TestStreamMaxConcurrencyFallsBackToSerialForMixedParallelSafety(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	})
+
+	first := parallelSafeTool(t, "first", "first", func(ctx context.Context, in echoInput) (string, error) {
+		close(firstStarted)
+		<-releaseFirst
+		return "first", nil
+	})
+	second, err := tool.NewFunc("second", "second", func(ctx context.Context, in echoInput) (string, error) {
+		secondStarted <- struct{}{}
+		return "second", nil
+	})
+	if err != nil {
+		t.Fatalf("NewFunc second error: %v", err)
+	}
+	m := &streamOnlyModel{turns: [][]model.Event{
+		{model.TurnMessage{Message: message.Assistant(toolUse("c0", "first"), toolUse("c1", "second"))}},
+		{model.TurnMessage{Message: message.Assistant(message.NewText("done"))}},
+	}}
+	r, err := New(m, WithMaxConcurrency(2))
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var streamErr error
+		for _, err := range r.Stream(context.Background(), testAgent(t, first, second), Text("hi")) {
+			if err != nil {
+				streamErr = err
+			}
+		}
+		done <- streamErr
+	}()
+
+	<-firstStarted
+	select {
+	case <-secondStarted:
+		t.Fatal("mixed safe/unsafe stream batch ran concurrently; whole batch must be serial")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if err := <-done; err != nil {
+		t.Fatalf("Stream error: %v", err)
 	}
 }
 

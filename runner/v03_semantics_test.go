@@ -69,11 +69,11 @@ func TestHandoffBatchAttributionEquivalence(t *testing.T) {
 	}
 	alpha, err := tool.NewFunc("alpha", "alpha", func(context.Context, noInput) (string, error) {
 		return "ok", nil
-	})
+	}, tool.WithEffects(parallelSafeEffects))
 	if err != nil {
 		t.Fatalf("NewFunc: %v", err)
 	}
-	modeA := mustMode(t, "default", "A", handoff, alpha)
+	modeA := mustMode(t, "default", "A", parallelSafeHandoff(t, handoff), alpha)
 	a := mustAgent(t, "A", modeA)
 
 	turns := []scriptTurn{
@@ -117,7 +117,7 @@ func TestHandoffBatchAttributionEquivalence(t *testing.T) {
 type blockingTool struct{ name string }
 
 func (b blockingTool) Info() tool.Info {
-	return tool.Info{Name: b.name, Description: b.name, InputSchema: emptyObjSchema}
+	return tool.Info{Name: b.name, Description: b.name, InputSchema: emptyObjSchema, Effects: parallelSafeEffects}
 }
 
 func (b blockingTool) Run(ctx context.Context, _ json.RawMessage) (tool.Result, error) {
@@ -132,7 +132,7 @@ type failingTool struct {
 }
 
 func (f failingTool) Info() tool.Info {
-	return tool.Info{Name: f.name, Description: f.name, InputSchema: emptyObjSchema}
+	return tool.Info{Name: f.name, Description: f.name, InputSchema: emptyObjSchema, Effects: parallelSafeEffects}
 }
 
 func (f failingTool) Run(context.Context, json.RawMessage) (tool.Result, error) {
@@ -150,7 +150,7 @@ type slowCtxAwareTool struct {
 }
 
 func (s slowCtxAwareTool) Info() tool.Info {
-	return tool.Info{Name: s.name, Description: s.name, InputSchema: emptyObjSchema}
+	return tool.Info{Name: s.name, Description: s.name, InputSchema: emptyObjSchema, Effects: parallelSafeEffects}
 }
 
 func (s slowCtxAwareTool) Run(ctx context.Context, _ json.RawMessage) (tool.Result, error) {
@@ -169,7 +169,7 @@ func (s slowCtxAwareTool) Run(ctx context.Context, _ json.RawMessage) (tool.Resu
 type selfCancelTool struct{ name string }
 
 func (s selfCancelTool) Info() tool.Info {
-	return tool.Info{Name: s.name, Description: s.name, InputSchema: emptyObjSchema}
+	return tool.Info{Name: s.name, Description: s.name, InputSchema: emptyObjSchema, Effects: parallelSafeEffects}
 }
 
 func (s selfCancelTool) Run(context.Context, json.RawMessage) (tool.Result, error) {
@@ -186,7 +186,7 @@ type cancelThenFailTool struct {
 }
 
 func (c cancelThenFailTool) Info() tool.Info {
-	return tool.Info{Name: c.name, Description: c.name, InputSchema: emptyObjSchema}
+	return tool.Info{Name: c.name, Description: c.name, InputSchema: emptyObjSchema, Effects: parallelSafeEffects}
 }
 
 func (c cancelThenFailTool) Run(ctx context.Context, _ json.RawMessage) (tool.Result, error) {
