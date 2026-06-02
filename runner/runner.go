@@ -343,6 +343,15 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 	if len(pending) > 0 {
 		return st.suspendedResult(pending), nil
 	}
+	return r.loop(ctx, st)
+}
+
+// loop drives the ReAct turns from the current run state: generate, and if the
+// model requested tools, run the batch and append its results, until the model
+// returns no tool calls (completed), a batch suspends (suspended Result), the
+// turn limit is reached, or an error occurs. It is the shared continuation used
+// by Run and by ResumeApproved after the resumed batch is appended.
+func (r *Runner) loop(ctx context.Context, st *runState) (*Result, error) {
 	for turn := 0; turn < r.maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			r.onError(ctx, err)
@@ -357,6 +366,7 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 		if len(calls) == 0 {
 			return st.result(msg), nil
 		}
+		var pending []PendingToolCall
 		ctx, pending, err = r.runToolCalls(ctx, st, calls)
 		if err != nil {
 			return nil, err
@@ -365,7 +375,7 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 			return st.suspendedResult(pending), nil
 		}
 	}
-	err = fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns)
+	err := fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns)
 	r.onError(ctx, err)
 	return nil, err
 }

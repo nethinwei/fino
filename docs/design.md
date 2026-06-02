@@ -670,9 +670,12 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 
 ### 人工确认和恢复
 
-权限确认不需要复杂 checkpoint。Policy 可以返回拒绝或特殊错误，用户在外层收集确认后重新调用 `runner.Run` 并传入同一段消息历史。
+权限确认不需要复杂 checkpoint，分两层：
 
-如果后续确实需要一等中断能力，也只保存待执行工具调用、当前消息历史和 mode，不引入图状态 checkpoint。
+- **挂起（Policy 决策）**：Policy 返回 `DecisionSuspend`，`runner.Run` 在执行该批工具前停下，返回 `Result{Suspended: true, PendingCalls: …}`，history 末尾保留 dangling 的 `tool_use`。这是非错误终止，不触发 OnError。
+- **审批恢复（一等 API）**：`Result.SuspendedRun()` 提取值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls}`（纯数据，不含活对象引用）；外层收集人工裁决 `[]Approval`（按 CallID 批准或拒绝），连同活的 agent 调用 `runner.ResumeApproved(ctx, agent, suspended, approvals)` 续跑：批准的（及同批原本 Allow 的）调用执行真实工具，被拒绝的写入模型可见的 `IsError` `tool_result`，随后续接 ReAct 循环。`ResumeApproved` 不重新调用 Policy——人工审批即最终决定。
+
+恢复只保存 history、agent/mode 名称和待执行调用，不引入图状态 checkpoint。快照只记录 `LastAgentName`（纯数据，不含活对象引用；能否 JSON 序列化取决于 tool metadata 是否可 marshal，核心不清洗），活 agent 由调用方重建后显式传入；handoff 后活跃 agent 已切换，`ResumeApproved` 据 `LastAgentName` 校验传入 agent，避免在错误上下文中 resolve 工具。它还拒绝带 system message 的历史、空 pending 与 mode override，使公开入口不绕过核心不变量。完整状态转移见 `docs/spec/loop-semantics.md` §3 `[T-RESUME]` 与 §7.3（不变量 I12）。
 
 ## 充分性命题
 
@@ -690,7 +693,7 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 2. **循环不变量**：用 property-based 测试在任意调度下验证语义性质，而非只做逐场景断言。
 3. **参考组合**：用核心之外的最小 add-on（重放、恢复、可观测、预算、评估）构造性地证明接缝足够。
 
-这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前 v0.2.x 已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复和若干 `x/` 参考组合；完整的 effect-aware 审批恢复、execution tape、并发安全和幂等边界属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
+这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*。当前已覆盖 ReAct 协议轨迹、流式边界、安全边界恢复、人工审批恢复（`ResumeApproved`，I12）和若干 `x/` 参考组合；effect-aware 并发、execution tape 和幂等边界属于后续 roadmap。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
 
 ## 形式化循环语义
 
@@ -753,9 +756,10 @@ parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至�
 | handoff 末位生效 | 同批多个 handoff 时，最终 agent/mode == 最后一个 handoff 的目标 |
 | 无系统消息泄漏 | `history` 任何时刻都不含 Runner 注入的 system message |
 | ctx 忠实 | `ctx` 取消后不再有新的模型调用或工具调用副作用 |
-| 安全边界恢复完备 | 在 completed turn boundary 上，`history + mode` 足以继续运行；pending tool resume 是当前 opt-in 接缝，不是完整审批恢复语义 |
+| 安全边界恢复完备 | 在 completed turn boundary 上，`history + mode` 足以继续运行；盲恢复是 opt-in 接缝 |
+| 审批恢复完备 | `ResumeApproved` 校验通过后，挂起批每个 `tool_use` 在追加的 `RoleTool` 中都有对应 `tool_result`（I12） |
 
-最后一条把安全边界恢复从核心的一个*功能*转化为核心的一个*可证明性质*。
+最后两条把安全边界恢复与人工审批恢复从核心的*功能*转化为核心的*可证明性质*。
 
 ## 接缝纪律
 
@@ -790,7 +794,7 @@ type ReplayModel struct{ Log *Log } // 不调用任何真实 provider
 
 - 依赖接缝：当前不变量“安全边界恢复完备”。
 - 实现：在安全边界（history 末尾为 tool 结果、user 消息或无 pending tool_use 的 assistant 文本）上序列化 `(history, mode)`；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
-- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的 HITL 续跑由唯一的最小接缝 `runner.WithResumeFromPendingTools()`（RunOption）支持：默认关闭、行为不变；opt-in 时在首个模型 turn 前先执行 history 末尾的 pending tools。它仍只暴露接缝、不引入 checkpoint/session/graph，`x/recover` 的 `Snapshot.ResumePending` 透传该接缝。见 `docs/spec/loop-semantics.md` §7.2。
+- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的恢复有两条路径：**盲恢复**用唯一最小接缝 `runner.WithResumeFromPendingTools()`（默认关闭，opt-in 时在首个模型 turn 前无条件执行 history 末尾的 pending tools），`x/recover` 的 `Snapshot.ResumePending` 透传它，适用于崩溃恢复；**人工审批恢复**用一等 API `runner.ResumeApproved`（逐调用批准/拒绝），它工作在 `SuspendedRun` 快照而非 `Snapshot` 上，`x/recover` 不参与。两者并存、互不内嵌。见 `docs/spec/loop-semantics.md` §7.2/§7.3。
 - 证明：崩溃恢复、长时运行无需核心新增中断子系统。
 
 ### 可观测性（tracing / metrics）
