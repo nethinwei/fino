@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -176,14 +177,24 @@ func validateSuspendedRun(suspended SuspendedRun, approvals []Approval) error {
 		// blind, approval-free resume, so reject it.
 		return fmt.Errorf("%w: suspended run has no pending calls to approve", ErrInvalidApproval)
 	}
-	inBatch := make(map[string]bool, len(batch))
+	byID := make(map[string]message.ToolUse, len(batch))
 	for _, tu := range batch {
-		inBatch[tu.ID] = true
+		byID[tu.ID] = tu
 	}
 	pendingIDs := make(map[string]bool, len(suspended.PendingCalls))
 	for _, pc := range suspended.PendingCalls {
-		if !inBatch[pc.Call.ID] {
+		tu, ok := byID[pc.Call.ID]
+		if !ok {
 			return fmt.Errorf("%w: pending call %q not in suspended batch", ErrInvalidApproval, pc.Call.ID)
+		}
+		// The approved payload must match the tool_use the resumed batch will
+		// actually execute (resumeExecuteBatch reads it from suspended.Messages),
+		// so a snapshot whose PendingCalls diverged from its Messages is rejected
+		// before any tool runs. This is a byte-level Input comparison: PendingCalls
+		// is extracted from this same batch at suspend time, so any difference
+		// signals a tampered or wrongly-rebuilt snapshot.
+		if pc.Call.Name != tu.Name || !bytes.Equal(pc.Call.Input, tu.Input) {
+			return fmt.Errorf("%w: pending call %q payload does not match the suspended tool_use", ErrInvalidApproval, pc.Call.ID)
 		}
 		if pendingIDs[pc.Call.ID] {
 			return fmt.Errorf("%w: duplicate pending call %q", ErrInvalidApproval, pc.Call.ID)
