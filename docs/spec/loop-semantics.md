@@ -57,10 +57,25 @@ State = (agent, mode, history, turn)
                                LastAgent: agent, LastMode: mode.Name})
 
 [T-TOOLS]    前置: 紧接 [T-MODEL] 之后且 toolUses(msg) = [c₁ … cₙ], n ≥ 1
-             动作: 见 §4（求值策略）
+             步骤1 authorizeBatch: 按调用序对每个 cᵢ 做 resolve + authorize（不执行任何工具）
+                   - resolve 失败              ⟶ OnError; halt(wrap(ErrToolNotFound, name))
+                   - ResolvedKind = Deny       ⟶ OnError; halt(ToolDeniedError{Tool, Decision})（fail-fast）
+                   - ResolvedKind = Suspend    ⟶ 收集进 pending 列表，继续后续调用（不短路，
+                                                  使靠后的 Deny 仍优先于靠前的 Suspend）
+             步骤2 suspend 检查: pending 非空 ⟶ [T-SUSPEND]（不执行任何工具）
+             步骤3 executeBatch: 见 §4（求值策略），执行全部已授权调用
              结果: history' = history ++ [ ToolResults(r₁ … rₙ) ]   // 单条 RoleTool 消息
                    若批次含 handoff: (agent', mode') = 末位 handoff 的 switchTo
-                   任一步失败: OnError(ctx, err); halt(err)
+                   执行期任一步失败: OnError(ctx, err); halt(err)
+
+[T-SUSPEND]  前置: authorizeBatch 收集到 ≥1 个 Suspend 且无 Deny
+             动作: 无（不执行任何工具，包括同批被 Allow 的调用）
+             结果: halt(Result{ Suspended: true,
+                               PendingCalls: [{Tool, Call, Reason} for 每个 Suspend 调用]（仅 Suspend，
+                                              被 Allow 但未执行的调用不计入）,
+                               Messages: history（末尾为含全部 tool_use 的 dangling assistant 消息）,
+                               LastAgent: agent, LastMode: mode.Name })
+             说明: 非错误路径，不触发 OnError。仅 Run 支持；Stream 将 Suspend 降级为 Deny（见 §5）。
 
 [T-MAXTURNS] 前置: turn = maxTurns（循环自然退出）
              动作: OnError(ctx, wrap(ErrMaxTurns, maxTurns))
@@ -75,24 +90,33 @@ turn 定义：一次 `[T-MODEL]` 即一个 turn。同一 `msg` 中的多个 tool
 
 `[T-TOOLS]` 对调用序列 `[c₁ … cₙ]` 求值，输出按调用序排列的结果块 `[r₁ … rₙ]`。单个调用的处理三段式：
 
+授权与执行分两阶段（见 [T-TOOLS]）：先对整批 `authorizeBatch`，再 `executeBatch`。单个调用的处理：
+
 ```text
 resolve(cᵢ)    : 在 mode.Tools 中按 Name 查找 → 找不到则 wrap(ErrToolNotFound, name)
 authorize(cᵢ)  : policy.Authorize(ctx, req) →
-                   err ≠ nil          ⟶ 策略系统故障，作为运行期错误返回
-                   Decision.Allow=假  ⟶ ToolDeniedError{Tool, Decision}
+                   err ≠ nil                 ⟶ 策略系统故障，作为运行期错误返回
+                   ResolvedKind = Deny       ⟶ ToolDeniedError{Tool, Decision}
+                   ResolvedKind = Suspend    ⟶ 收集进 pending（批末若有 pending 则 [T-SUSPEND]）
+                   ResolvedKind = Allow      ⟶ 进入 executeBatch
 execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)   // 仅成功时 AfterTool
                  handoff 工具: 记录结果后 switchTo(target)
 ```
 
+`ResolvedKind` 见 §6 与 `policy.Decision.ResolvedKind()`：未设 `Kind` 时回退到旧的 `Allow` 布尔（真→Allow，假→Deny），保证既有二态 Policy 不变。
+
 ### 4.1 串行策略（maxConcurrency ≤ 1，默认）
 
-按调用序逐个完成 `resolve → authorize → execute`，首个错误立即 `halt`。每次工具调用前检查 `ctx.Err()`。Hooks 返回的 `ctx` 线性传递到下一次调用与下一次模型调用。
+先对整批按调用序完成 `resolve → authorize`（authorize-all-before-execute），任一 Deny 或 Suspend 都使该批**无任何工具执行**；随后按调用序逐个 `execute`，首个执行错误立即 `halt`。每次工具调用前检查 `ctx.Err()`。Hooks 返回的 `ctx` 线性传递到下一次调用与下一次模型调用。
+
+> 行为收紧：旧串行实现是逐调用 `authorize→execute`，靠后调用被 Deny 前靠前调用已产生副作用。改为整批先授权后，`call₁=Allow + call₂=Deny` 时 call₁ 不再执行——这使串/并行在 fail-fast 下真正等价（I6），符合“批内任一被拒则全批无副作用”的网关语义。
 
 ### 4.2 并行策略（maxConcurrency = k > 1 且 n > 1）
 
 ```text
 1. authorizeBatch: 按调用序串行完成所有 resolve + authorize（不执行用户代码）。
-                   首个未找到或被拒绝的调用 fail-fast。
+                   首个未找到或被拒绝的调用 fail-fast；任一 Suspend 收集进 pending，
+                   批末 pending 非空则 [T-SUSPEND]，全批不执行。
 2. executeParallel: 至多 k 个 execute 并发；首错取消同批派生 ctx，使 ctx-aware 兄弟提前停止。
 3. 收集: 结果按调用索引写回 [r₁ … rₙ]，与完成顺序无关。
 4. 错误: 按调用序返回第一个非空错误（与串行“首错即返回”一致）。
@@ -115,6 +139,8 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 - 转发 model.Stream 的语义事件（ContentBlockStart/Delta/Stop、TextDelta）；每个 turn 的 TurnMessage 也按 turn 转发，
   使含工具调用的中间 turn 的完整 assistant 快照可观测、可重放。
 - 仅在收到当前 turn 的 TurnMessage 后解析 toolUses 并执行工具。
+- Suspend 降级: Stream 没有 suspended Result 出口（返回 iter.Seq2[Event, error]），且 FinalMessage 只用于无工具调用的终态 turn。
+  故 Stream 将 DecisionSuspend 降级为 ToolDeniedError（运行期终止错误），不引入新事件类型。完整 suspend 语义仅在 Run。
 - 每个工具调用前发 ToolCall，调用后发 ToolResult；handoff 在批次结束后发 Handoff。
 - 整个 run 的最后一个 turn（无工具调用）之后，Runner 额外发出恰好一个 FinalMessage 作为 run 终态。
 - 所有事件只在迭代器所在的单一 goroutine 上产生。
@@ -135,6 +161,9 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、所选 mode 不存在。
                                     ⟶ Run: 直接返回 error，不触发 OnError。
                                     ⟶ Stream: 经 iterator 第二返回值并配 StreamError 报告，触发 OnError。
+
+非错误终止（Run）: DecisionSuspend 经 [T-SUSPEND] 产出 Result{Suspended:true}，不是错误，
+                  不触发 OnError，不配 StreamError。Stream 不支持该路径（降级为 ToolDeniedError）。
 ```
 
 可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`。消费者用 `errors.Is` / `errors.As` 分支。
@@ -147,9 +176,10 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 |------|------|----------|
 | I1 | 结果有序 | 追加的 `ToolResults` 中第 i 个 `tool_result` 的 `ToolUseID` == 第 i 个 `tool_use` 的 `ID` |
 | I2 | 批次单消息 | 每次 `[T-TOOLS]` 恰好向 history 追加一条 `RoleTool` 消息 |
-| I3 | 终止唯一 | `Run` 的输出 ∈ `{一个 Result, 一个 error}`，互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
-| I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1 |
-| I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `Allow` |
+| I3 | 终止唯一 | `Run` 的输出 ∈ `{一个完成 Result(Suspended=false), 一个挂起 Result(Suspended=true), 一个 error}`，三者互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
+| I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1；挂起（非错误）不触发 OnError |
+| I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `ResolvedKind = Allow` |
+| I11 | 挂起精确性 | `[T-SUSPEND]` 后 `PendingCalls` 恰好等于该批 `ResolvedKind = Suspend` 的调用（按调用序）；被 Allow 但未执行的调用不计入，且该批不追加任何 `RoleTool` 消息 |
 | I6 | 协议轨迹等价 | 在工具独立、或后续声明为可安全并行的前提下，并行执行产生与串行相同的 Runner 协议轨迹（结果顺序、首错选择、终止形态） |
 | I7 | handoff 末位 | 同批含 handoff `[h_j … h_m]` 时，终态 `agent` == `h_m.TargetAgent()` |
 | I8 | 无系统泄漏 | ∀ 时刻，`∀ msg ∈ history: msg.Role ≠ system` |

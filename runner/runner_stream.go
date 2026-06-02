@@ -9,6 +9,7 @@ import (
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
+	"github.com/nethinwei/fino/policy"
 	"github.com/nethinwei/fino/tool"
 )
 
@@ -183,8 +184,17 @@ func (r *Runner) handleStreamToolCall(ctx context.Context, st *runState, toolsBy
 		r.emitErr(ctx, yield, fmt.Errorf("%w: %q", ErrToolNotFound, call.Name))
 		return ctx, message.Block{}, nil, false
 	}
-	if err := r.authorize(ctx, st, selected, call); err != nil {
+	decision, err := r.authorize(ctx, st, selected, call)
+	if err != nil {
 		r.emitErr(ctx, yield, err)
+		return ctx, message.Block{}, nil, false
+	}
+	// Stream has no suspended Result path (it returns iter.Seq2[Event, error]
+	// with no Result), and FinalMessage is reserved for the no-tool-call turn.
+	// PR2 downgrades suspend to a deny error in Stream; full suspend semantics
+	// live on Run. See the PR2 design and loop-semantics §5.
+	if decision.ResolvedKind() == policy.DecisionSuspend {
+		r.emitErr(ctx, yield, &ToolDeniedError{Tool: selected.Info(), Decision: decision})
 		return ctx, message.Block{}, nil, false
 	}
 	if !yield(model.ToolCall{Call: call}, nil) {
@@ -240,9 +250,19 @@ type streamResult struct {
 // order, otherwise applies handoffs and appends the batched RoleTool message.
 func (r *Runner) streamToolCallsParallel(ctx context.Context, st *runState, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
 	_, toolsByName := collectTools(st.mode.Tools)
-	selected, err := r.authorizeBatch(ctx, st, toolsByName, calls)
+	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
 	if err != nil {
 		r.emitErr(ctx, yield, err)
+		return ctx, false
+	}
+	// Stream downgrades suspend to deny (see handleStreamToolCall): report the
+	// first suspended call as a ToolDeniedError. PR2 has no suspended stream event.
+	if len(pending) > 0 {
+		pc := pending[0]
+		r.emitErr(ctx, yield, &ToolDeniedError{
+			Tool:     pc.Tool,
+			Decision: policy.Decision{Kind: policy.DecisionSuspend, Reason: pc.Reason},
+		})
 		return ctx, false
 	}
 	for _, call := range calls {

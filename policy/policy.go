@@ -28,10 +28,46 @@ type Request struct {
 	Input     json.RawMessage
 }
 
-// Decision is the result of an authorization check.
+// DecisionKind is the three-state outcome of an authorization check.
+type DecisionKind uint8
+
+const (
+	// DecisionUnspecified is the zero value. It means the Policy did not set
+	// Kind, so the Runner falls back to the legacy Allow bool (see ResolvedKind).
+	DecisionUnspecified DecisionKind = iota
+	// DecisionAllow permits the tool to execute.
+	DecisionAllow
+	// DecisionDeny rejects the tool; the Runner fails the run with ToolDeniedError.
+	DecisionDeny
+	// DecisionSuspend halts the run so a human can approve the call. The Run
+	// path returns a suspended Result; suspend is not a runtime error.
+	DecisionSuspend
+)
+
+// Decision is the result of an authorization check. New code should set Kind.
+// The Allow field is soft-deprecated: it is honored only when Kind is
+// DecisionUnspecified, via the migration rule in ResolvedKind.
 type Decision struct {
+	// Kind is the three-state decision. Prefer setting this over Allow.
+	Kind DecisionKind
+	// Allow is the legacy binary decision. It is read only when Kind is
+	// DecisionUnspecified. New implementations should leave it at its zero value.
 	Allow  bool
 	Reason string
+}
+
+// ResolvedKind returns the effective decision kind. If Kind is set (not
+// DecisionUnspecified) it is returned directly; otherwise the legacy Allow bool
+// is mapped (true -> DecisionAllow, false -> DecisionDeny). This single rule
+// keeps existing binary policies working without modification.
+func (d Decision) ResolvedKind() DecisionKind {
+	if d.Kind != DecisionUnspecified {
+		return d.Kind
+	}
+	if d.Allow {
+		return DecisionAllow
+	}
+	return DecisionDeny
 }
 
 // AllowAll is a Policy that allows every tool invocation.
@@ -39,5 +75,5 @@ type AllowAll struct{}
 
 // Authorize allows all tool invocations unconditionally.
 func (AllowAll) Authorize(ctx context.Context, req Request) (Decision, error) {
-	return Decision{Allow: true}, nil
+	return Decision{Kind: DecisionAllow}, nil
 }
