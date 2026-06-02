@@ -2,7 +2,7 @@
 
 > 本文是 `fino` Runner 循环的规范性参考（normative reference）。它把 `docs/design.md` 中的散文描述升级为可机器检查的状态转移系统，并定义一组对任意输入都成立的不变量。`runner/runner.go` 是本规约的参考实现；当实现与本规约冲突时，以本规约为准并修正实现。
 >
-> 适用范围：`runner.Run` 与 `runner.Stream`。涵盖 turn 边界、工具批次（串行与并行）、handoff、Policy 授权、Hooks 触发、`ctx` 取消与终止错误。
+> 适用范围：`runner.Run`、`runner.Stream` 与 `runner.ResumeApproved`。涵盖 turn 边界、工具批次（串行与并行）、handoff、Policy 授权、Hooks 触发、`ctx` 取消、挂起与审批恢复、终止错误。
 
 ## 1. 记号
 
@@ -82,6 +82,34 @@ State = (agent, mode, history, turn)
              结果: halt(ErrMaxTurns)
 ```
 
+`ResumeApproved` 是 `Run` 之外的另一个循环入口：它从一个挂起 `Result` 的快照 `SuspendedRun` 出发，对该批挂起调用执行人工审批，再续接 `[T-MODEL]` 循环。它不是正常单步优先级的一部分，单列如下：
+
+```text
+[T-RESUME]   前置: ResumeApproved(ctx, a, suspended, approvals, opts) 被调用
+             步骤0 agent 校验: a.Name() == suspended.LastAgentName
+                   不匹配 ⟶ 返回 ErrResumeAgentMismatch（循环前；不触发 OnError）
+             步骤1 校验 SuspendedRun + approvals:
+                   - suspended.Messages 不含 system message（否则 ErrSystemMessageInHistory，护 I8）
+                   - suspended.Messages 末尾须为含 ≥1 个 tool_use 的 dangling assistant
+                   - PendingCalls 非空（空 pending 会退化为无审批盲恢复，拒绝）
+                   - 每个 PendingCall.Call.ID 须出现在该批 tool_use 中，且不重复
+                   - approvals 对每个 PendingCall 恰好一个，无未知 CallID、无重复
+                   校验失败 ⟶ 返回 ApprovalError / wrap(ErrInvalidApproval)（循环前；不触发 OnError）
+             步骤1b mode 锁定: opts 不得 override mode（cfg.modeName 必须 == suspended.LastMode），
+                   否则该批 tool_use 会在错误工具集中 resolve ⟶ wrap(ErrInvalidApproval)。其余 opts（如模型选项）照常生效。
+             步骤2 executeBatch（不重新授权; 见 §4 求值策略，始终串行按调用序）:
+                   对末批每个 tool_use cᵢ:
+                     若 cᵢ ∈ PendingCalls 且其 approval.Approved=false:
+                        产出 tool_result{IsError:true, "rejected: <Reason>"}（不执行工具）
+                     否则（已批准的挂起调用，或同批被 Allow 未执行的调用）:
+                        resolve + execute（执行错误 ⟶ OnError; halt(err)）
+             步骤3 追加: history' = suspended.Messages ++ [ ToolResults(r₁ … rₙ) ]（单条 RoleTool）
+                   若批含 handoff（被批准执行的 handoff 工具）: 末位 switchTo 生效
+             步骤4 续接 [T-MODEL] 循环
+```
+
+`ResumeApproved` 不调用 `Policy.Authorize`：挂起调用已在原批 `authorizeBatch` 中得到 `Suspend`/`Allow` 决策，人工审批替代策略授权做最终决定。续接循环本身可再次挂起（产出新的挂起 `Result`）。
+
 `opts` 为模型选项的两层合并：先 `mode.ModelOptions`，再本次运行 `WithModelOptions(...)`，后者追加在后，优先生效。
 
 turn 定义：一次 `[T-MODEL]` 即一个 turn。同一 `msg` 中的多个 tool call 共属同一 turn 的一次 `[T-TOOLS]`。handoff 后目标 agent 的下一次 `[T-MODEL]` 是新 turn。handoff 不单独计深度，由 `maxTurns` 兜底。
@@ -158,15 +186,19 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
                                     ErrStreamContract（仅 Stream：model.Stream 违反事件契约）。
                                     ⟶ 触发 OnError 恰好一次。
 
-构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、所选 mode 不存在。
-                                    ⟶ Run: 直接返回 error，不触发 OnError。
+构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、所选 mode 不存在；
+                                    ResumeApproved 的 ErrResumeAgentMismatch、ErrSystemMessageInHistory，
+                                    以及 wrap(ErrInvalidApproval)（ApprovalError，或快照非法：空 pending / mode override / dangling 缺失）。
+                                    ⟶ Run / ResumeApproved: 直接返回 error，不触发 OnError，不执行任何工具。
                                     ⟶ Stream: 经 iterator 第二返回值并配 StreamError 报告，触发 OnError。
 
 非错误终止（Run）: DecisionSuspend 经 [T-SUSPEND] 产出 Result{Suspended:true}，不是错误，
                   不触发 OnError，不配 StreamError。Stream 不支持该路径（降级为 ToolDeniedError）。
 ```
 
-可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`。消费者用 `errors.Is` / `errors.As` 分支。
+`ResumeApproved` 在校验通过后进入 executeBatch；该阶段的工具执行错误属运行期终止错误，触发 OnError 恰好一次（与 `[T-TOOLS]` 一致）。
+
+可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`、`ErrNotSuspended`（`Result.SuspendedRun` 用）、`ErrInvalidApproval`（由 `ApprovalError.Unwrap` 暴露）、`ErrResumeAgentMismatch`。`ErrNotSuspended` 与 `ErrInvalidApproval` 是不同条件，不得混淆。消费者用 `errors.Is` / `errors.As` 分支。
 
 ## 7. 不变量
 
@@ -176,7 +208,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 |------|------|----------|
 | I1 | 结果有序 | 追加的 `ToolResults` 中第 i 个 `tool_result` 的 `ToolUseID` == 第 i 个 `tool_use` 的 `ID` |
 | I2 | 批次单消息 | 每次 `[T-TOOLS]` 恰好向 history 追加一条 `RoleTool` 消息 |
-| I3 | 终止唯一 | `Run` 的输出 ∈ `{一个完成 Result(Suspended=false), 一个挂起 Result(Suspended=true), 一个 error}`，三者互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
+| I3 | 终止唯一 | `Run`（及 `ResumeApproved`）的输出 ∈ `{一个完成 Result(Suspended=false), 一个挂起 Result(Suspended=true), 一个 error}`，三者互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
 | I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1；挂起（非错误）不触发 OnError |
 | I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `ResolvedKind = Allow` |
 | I11 | 挂起精确性 | `[T-SUSPEND]` 后 `PendingCalls` 恰好等于该批 `ResolvedKind = Suspend` 的调用（按调用序）；被 Allow 但未执行的调用不计入，且该批不追加任何 `RoleTool` 消息 |
@@ -185,6 +217,7 @@ execute(cᵢ)    : BeforeTool(ctx) → tool.Run(ctx, input) → AfterTool(ctx)  
 | I8 | 无系统泄漏 | ∀ 时刻，`∀ msg ∈ history: msg.Role ≠ system` |
 | I9 | ctx 忠实 | `ctx` 取消后不再发生新的 `model.Generate`/`model.Stream` 或 `tool.Run` |
 | I10 | 安全边界恢复完备 | 在 completed turn boundary（history 末尾为 user/tool 消息或无 pending tool_use 的 assistant 消息）上，`(history, mode.Name)` 足以继续运行 |
+| I12 | 审批恢复完备 | `ResumeApproved` 校验通过后，挂起批中**每个** `tool_use` 在追加的单条 `RoleTool` 消息中都有对应 `tool_result`（被批准/原 Allow 的为真实结果，被拒绝的为 `IsError=true` 的 `rejected:` 结果），故续接的 `[T-MODEL]` 观察到一个良构 history |
 
 ### 7.1 关于 I6（协议轨迹等价）与诱导取消
 
@@ -209,7 +242,18 @@ I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 
 
   探针 `runner/recover_seam_test.go` 同时固定两侧行为：默认不自动执行 dangling 工具；启用接缝后执行之。
 
-未来若引入 `Suspend` / `ResumeApproved`，本节应拆分为安全边界恢复与一等审批恢复两套状态转移；在此之前，不得把该接缝描述为完整 HITL 恢复保证。
+`WithResumeFromPendingTools()` 是**盲恢复**：它无条件执行全部 pending 工具，不带审批，适用于崩溃恢复（`x/recover`）。需要逐调用人工裁决时用 §7.3 的 `ResumeApproved`，二者并存且互不内嵌。
+
+### 7.3 关于 I12（审批恢复完备）
+
+`[T-SUSPEND]` 产出的挂起 `Result` 经 `Result.SuspendedRun()` 提取为值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls}`（纯数据，不含活对象引用），由调用方自行持久化，再连同活的 agent 一起传入 `ResumeApproved`（见 §3 `[T-RESUME]`）。这是一等审批恢复，与 §7.2 的安全边界恢复是两套不同的转移：
+
+- **agent 上下文**：挂起前可能已发生 handoff，活跃 agent 不再是根 agent。`SuspendedRun` 只记录 `LastAgentName`/`LastMode`（纯数据，不持有活对象引用）；活 agent 是调用方重建的代码，由其显式传入。能否 JSON 序列化取决于 `PendingCall` 内 `tool.Info.Metadata` 是否可 marshal，核心不清洗。`ResumeApproved` 校验传入 agent 的 `Name()` 与 `LastAgentName` 一致，避免在错误 agent 上下文中 resolve 工具。`PendingToolCall` 不重复携带 per-call agent/mode（同批必属单一 agent+mode）。
+- **审批裁决**：`Approval{CallID, Approved, Reason}` 按 `CallID` 绑定到挂起调用。批准→执行工具；拒绝→写入 `IsError=true` 的 `rejected: <Reason>` 结果，使模型可见并据此调整（拒绝是模型可见的结果，不是隐藏控制流）。
+- **不重新授权**：挂起调用已被授权，`ResumeApproved` 不再调用 `Policy.Authorize`（D5）。
+- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。`InputHash`/防篡改、跨进程 exactly-once、Stream 的 suspend/resume 事件均不在核心内（属 `x/` 或应用层）。
+
+`x/recover` 的 `Snapshot` 仅承载安全边界恢复（I10）；审批恢复由 `runner.ResumeApproved` 一等承载，二者职责不重叠。
 
 ## 8. 一致性义务
 

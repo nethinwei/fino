@@ -271,7 +271,7 @@ fino 的命题是：**复杂工具型 Agent 的可靠执行基础设施，不需
 | Add-on | 难题 | 依赖的接缝 |
 | --- | --- | --- |
 | [`x/replay`](x/replay) | 可复现与调试 | 记录当前的模型/工具效应；Policy 决策和会影响行为的拦截器尚未进入完整 execution tape |
-| [`x/recover`](x/recover) | 崩溃恢复与续跑 | 安全边界续跑（`history + mode`），外加当前 HITL 示例使用的 opt-in pending-tool 接缝 |
+| [`x/recover`](x/recover) | 崩溃恢复与续跑 | 安全边界续跑（`history + mode`）及盲恢复的 opt-in pending-tool 接缝；HITL 审批恢复由 `runner.ResumeApproved` 承载，不经 `x/recover` |
 | [`x/trace`](x/trace) | tracing 与可观测性 | `hooks.Hooks` 的确定触发顺序 |
 | [`x/budget`](x/budget) | 成本 / token 预算 | `model.Model` 装饰器 |
 | [`x/eval`](x/eval) | 可复现回归测试 | 当前基于已记录的模型/工具效应；未来 execution tape 会补齐 policy/suspend 边界 |

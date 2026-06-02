@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-02
+
+### Added
+
+- **Approved resume** — `runner.ResumeApproved` continues a suspended run after a
+  human approves or rejects its pending tool calls. `Result.SuspendedRun()`
+  extracts a `SuspendedRun` snapshot (carrying `LastAgentName` and
+  `LastMode` — only the agent *name*, no live object reference; the live agent is
+  passed back by the caller). The snapshot is plain data; whether it JSON-marshals
+  depends on each `PendingCall`'s `tool.Info.Metadata` being marshalable (the core
+  does not sanitize it). Callers collect
+  `Approval` values (approve/reject per CallID) and pass them to `ResumeApproved`,
+  which validates them, executes approved (and previously allowed) calls, writes
+  rejections as model-visible `tool_result` blocks, and resumes the ReAct loop.
+  It does not re-consult the policy — human approval is the final decision.
+  ResumeApproved also rejects a snapshot that leaks a system message
+  (`ErrSystemMessageInHistory`, protecting the no-system-leak invariant), has no
+  pending calls, or tries to override the mode.
+- **ApprovalError / ErrInvalidApproval** — typed validation error (missing,
+  unknown, or duplicate approvals; and malformed-snapshot cases) wrapping the
+  `ErrInvalidApproval` sentinel, kept distinct from `ErrNotSuspended` (returned by
+  `Result.SuspendedRun()` on a completed result) and `ErrResumeAgentMismatch`
+  (wrong agent on resume).
+
+### Changed
+
+- **Loop semantics** — `docs/spec/loop-semantics.md` gains the `[T-RESUME]`
+  transition and invariant **I12** (approval-resume completeness), and §7.2 is
+  split into safe-boundary recovery (I10) and first-class approval resume (§7.3,
+  I12). The `hitl_resume` cookbook now uses `DecisionSuspend` + `SuspendedRun` +
+  `ResumeApproved` instead of the blind `WithResumeFromPendingTools` seam.
+
 ## [0.3.0] - 2026-06-02
 
 ### Added
@@ -105,6 +137,7 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
+[0.4.0]: https://github.com/nethinwei/fino/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nethinwei/fino/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nethinwei/fino/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nethinwei/fino/compare/v0.1.0...v0.2.0

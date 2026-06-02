@@ -1,6 +1,7 @@
 // Command hitl_resume shows human-in-the-loop tool approval built only from
-// fino primitives: a Policy gates a sensitive tool, and after the human
-// approves, the run continues mid-batch via runner.WithResumeFromPendingTools.
+// fino primitives: a Policy suspends a sensitive tool (DecisionSuspend), the run
+// halts with a suspended Result, a human approves or rejects each pending call,
+// and runner.ResumeApproved continues the ReAct loop.
 //
 // It uses a tiny scripted model so it runs offline and deterministically — no
 // API key required. The same wiring works against any real provider.
@@ -16,7 +17,6 @@ import (
 	"log"
 
 	"github.com/nethinwei/fino/agent"
-	"github.com/nethinwei/fino/hooks"
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/policy"
@@ -25,7 +25,7 @@ import (
 )
 
 // scriptedModel returns one assistant message per turn. It is the whole "LLM"
-// for this example: turn 0 requests the delete_file tool, turn 1 wraps up.
+// for this example: turn 0 requests the delete_file tool, later turns wrap up.
 type scriptedModel struct {
 	turns []message.Message
 	i     int
@@ -33,7 +33,7 @@ type scriptedModel struct {
 
 func (m *scriptedModel) next() message.Message {
 	if m.i >= len(m.turns) {
-		return message.Assistant(message.NewText("done"))
+		return message.Assistant(message.NewText("done — file deleted"))
 	}
 	msg := m.turns[m.i]
 	m.i++
@@ -52,14 +52,14 @@ func (m *scriptedModel) Stream(context.Context, []message.Message, []tool.Info, 
 	}
 }
 
-// gatePolicy denies a fixed set of sensitive tools so a human can decide.
+// gatePolicy suspends a fixed set of sensitive tools so a human can decide.
 type gatePolicy struct{ gated map[string]bool }
 
 func (p gatePolicy) Authorize(_ context.Context, req policy.Request) (policy.Decision, error) {
 	if p.gated[req.Tool.Name] {
-		return policy.Decision{Allow: false, Reason: "needs human approval"}, nil
+		return policy.Decision{Kind: policy.DecisionSuspend, Reason: "needs human approval"}, nil
 	}
-	return policy.Decision{Allow: true}, nil
+	return policy.Decision{Kind: policy.DecisionAllow}, nil
 }
 
 type pathInput struct {
@@ -83,57 +83,50 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Turn 0: the model asks to delete a file. We stop here for approval.
+	// Turn 0: the model asks to delete a file. The policy suspends it.
 	toolUse := message.Assistant(message.NewToolUse("c1", "delete_file", json.RawMessage(`{"path":"/tmp/report.txt"}`)))
 	m := &scriptedModel{turns: []message.Message{toolUse}}
 
-	// Capture the real assistant message the model produced, instead of
-	// hand-rebuilding it. A server would persist exactly this — the user prompt
-	// plus the captured assistant tool_use — when the policy pauses the run.
-	var capturedAssistant *message.Message
-	capture := runner.WithHooks(&hooks.Hooks{
-		AfterModel: func(_ context.Context, res hooks.ModelResult) {
-			if len(res.Message.ToolUses()) > 0 {
-				snapshot := *res.Message
-				capturedAssistant = &snapshot
-			}
-		},
-	})
 	gated := runner.WithPolicy(gatePolicy{gated: map[string]bool{"delete_file": true}})
-	r, err := runner.New(m, gated, capture)
+	r, err := runner.New(m, gated)
 	if err != nil {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
 
-	const prompt = "Delete /tmp/report.txt"
-	// First leg: the policy denies the gated call. The AfterModel hook has
-	// already captured the dangling assistant tool_use for us.
-	_, err = r.Run(ctx, a, runner.Text(prompt))
-	if err == nil {
-		log.Fatal("expected the gated tool to be denied")
-	}
-	if capturedAssistant == nil {
-		log.Fatal("expected to capture the assistant tool_use before denial")
-	}
-	fmt.Printf("paused for approval: %v\n", err)
-
-	// Persist what a real app would store while waiting for a human.
-	pending := []message.Message{
-		message.UserText(prompt),
-		*capturedAssistant, // dangling assistant tool_use, no result yet
-	}
-
-	// ----- a human reviews and approves here -----
-
-	// Second leg: a runner whose policy now allows the tool, resumed from the
-	// pending tool_use. No checkpoint type, no graph — just history + a seam.
-	m2 := &scriptedModel{}          // after the tool runs, the model wraps up
-	approved, err := runner.New(m2) // default AllowAll policy
+	// First leg: the run suspends before executing the gated tool. The history
+	// already holds the dangling assistant tool_use — nothing to hand-capture.
+	res, err := r.Run(ctx, a, runner.Text("Delete /tmp/report.txt"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	res, err := approved.Run(ctx, a, runner.Messages(pending), runner.WithResumeFromPendingTools())
+	if !res.Suspended {
+		log.Fatal("expected the gated tool to suspend the run")
+	}
+
+	// SuspendedRun is a plain, serializable value snapshot. A server can JSON it
+	// while waiting for a human; here we keep it in memory. LastAgentName records
+	// the agent active at suspend time so the resume re-enters the right context
+	// — the live agent is reconstructed by the caller (here, the same `a`).
+	suspended, err := res.SuspendedRun()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("paused for approval (%d pending):\n", len(suspended.PendingCalls))
+	for _, pc := range suspended.PendingCalls {
+		fmt.Printf("  - %s%s  reason=%q\n", pc.Call.Name, pc.Call.Input, pc.Reason)
+	}
+
+	// ----- a human reviews and decides here -----
+	approvals := make([]runner.Approval, 0, len(suspended.PendingCalls))
+	for _, pc := range suspended.PendingCalls {
+		approvals = append(approvals, runner.Approval{CallID: pc.Call.ID, Approved: true})
+	}
+
+	// Second leg: resume with the human's decisions. Approved calls run their
+	// real tool; rejected calls become model-visible error results. No
+	// checkpoint type, no graph — just the snapshot plus the approvals.
+	res, err = r.ResumeApproved(ctx, a, suspended, approvals)
 	if err != nil {
 		log.Fatal(err)
 	}

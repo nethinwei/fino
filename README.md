@@ -271,7 +271,7 @@ fino's thesis is that **reliable execution infrastructure for complex tool-using
 | Add-on | Problem | Seam it rides on |
 | --- | --- | --- |
 | [`x/replay`](x/replay) | Reproducibility & debugging | records current model/tool effects; policy decisions and behavior-affecting interceptors are not yet part of a full execution tape |
-| [`x/recover`](x/recover) | Crash recovery & durable continuation | safe-boundary continuation (`history + mode`) plus an opt-in pending-tool seam for current HITL examples |
+| [`x/recover`](x/recover) | Crash recovery & durable continuation | safe-boundary continuation (`history + mode`) plus an opt-in pending-tool seam for blind/crash resume; HITL approval resume is `runner.ResumeApproved`, not `x/recover` |
 | [`x/trace`](x/trace) | Tracing & observability | deterministic `hooks.Hooks` firing |
 | [`x/budget`](x/budget) | Cost / token budgets | a `model.Model` decorator |
 | [`x/eval`](x/eval) | Reproducible regression testing | currently built on recorded model/tool effects; future execution tapes will close the policy/suspend boundary |
