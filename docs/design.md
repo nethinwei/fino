@@ -666,6 +666,143 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 
 如果后续确实需要一等中断能力，也只保存待执行工具调用、当前消息历史和 mode，不引入图状态 checkpoint。
 
+## 充分性命题
+
+`fino` 不靠增加核心能力取胜，而是**证明现有最小核心足以可靠表达 Agent 领域的难题**。
+
+命题：
+
+> 可靠的复杂 Agent 能力不需要框架，只需要正确的最小原语、精确语义和组合。
+
+这条命题把 `fino` 与边界模糊的框架区分开：后者主张“我替你实现了一切”，`fino` 主张“我证明了你从不需要那个框架”。前者是产品，后者是可被检验、可被引用的论断。
+
+命题的检验由三部分构成，互为支撑，且都不触碰核心包边界（见“非目标”与 `CLAUDE.md` 硬性约束）：
+
+1. **形式化循环语义**：把 Runner 循环从散文升级为可机器检查的状态转移规则。
+2. **循环不变量**：用 property-based 测试在任意调度下验证语义性质，而非只做逐场景断言。
+3. **参考组合**：用核心之外的最小 add-on（重放、恢复、可观测、预算、评估）构造性地证明接缝足够。
+
+这三部分分别是命题的*精确陈述*、*严格性*与*构造性证据*，均已落地：完整规约见 `docs/spec/loop-semantics.md`，不变量验证见 `runner/invariants_test.go`，参考组合见 `x/` 目录。最初的实施计划见 `docs/superpowers/plans/2026-06-02-fino-sufficiency.md`。
+
+## 形式化循环语义
+
+Runner 循环是一个确定性状态转移系统。外部不确定性（模型输出、工具结果、时间、`ctx` 取消）全部作为输入注入，循环本身不持有隐藏状态。
+
+运行状态：
+
+```text
+State = (agent, mode, history, turn)
+```
+
+`history` 永不包含 Runner 注入的 system message；每次模型调用临时构造 `[system(mode.Instructions)] + history`。
+
+单步转移（small-step），对齐 `runner/runner.go` 实际控制流：
+
+```text
+[T-CANCEL]   ctx.Err() ≠ nil
+             ⟶ OnError(err); halt(err)
+
+[T-MODEL]    turn < maxTurns 且 ctx ok
+             ⟶ msg = model.Generate(system(mode) + history)
+                history' = history ++ [msg]; turn' = turn + 1
+
+[T-FINAL]    msg.ToolUses() = ∅
+             ⟶ halt(Result{Message: msg, LastAgent: agent, LastMode: mode})
+
+[T-TOOLS]    msg.ToolUses() = [c₁ … cₙ], n ≥ 1
+             ⟶ 对每个 cᵢ 按调用序: resolve → authorize → execute
+                history' = history ++ [ToolResults(r₁ … rₙ)]   // 单条 RoleTool 消息
+                若某 cᵢ 为 handoff: (agent', mode') = switchTo(target)，末位生效
+
+[T-MAXTURNS] turn = maxTurns
+             ⟶ OnError(ErrMaxTurns); halt(ErrMaxTurns)
+```
+
+一个 turn 定义为一次 `[T-MODEL]`。同一模型响应中的多个 tool call 属于同一 turn 的一次 `[T-TOOLS]`。handoff 后目标 agent 的下一次 `[T-MODEL]` 是新 turn。
+
+工具批次 `[T-TOOLS]` 有两种求值策略，对外部可观察结果**等价**：
+
+```text
+serial   (maxConcurrency ≤ 1) : resolve→authorize→execute 按调用序逐个完成
+parallel (maxConcurrency = k>1): authorize 仍按调用序串行；execute 至多 k 并发；
+                                 结果按调用序写回；首错（按调用序）取消同批其余并返回
+```
+
+两条策略满足同一组不变量（下节），这正是“并行不改变语义”的精确含义。
+
+## 循环不变量
+
+下列性质对任意模型脚本、任意工具集、任意调度都成立，由 property-based / 状态机测试验证，而非逐场景断言。
+
+| 不变量 | 陈述 |
+|--------|------|
+| 结果有序 | `tool_result` 块顺序 == 对应 `tool_use` 调用顺序，与完成顺序无关 |
+| 批次单消息 | 每个产生工具调用的 assistant turn 恰好追加一条 `RoleTool` 消息 |
+| 终止唯一 | `Run` 恰好返回一个 Result 或一个 error；`Stream` 至多一个 `FinalMessage` 终态，且终止错误恰好配一个 `StreamError` |
+| OnError 一次 | 每个运行期终止错误恰好触发一次 `OnError` |
+| 授权先于执行 | 任一工具的 `Run` 之前，其 `Authorize` 已返回 `Allow` |
+| fail-fast 等价 | 并行路径返回的首个错误 == 串行路径在相同输入下返回的首个错误（按调用序） |
+| handoff 末位生效 | 同批多个 handoff 时，最终 agent/mode == 最后一个 handoff 的目标 |
+| 无系统消息泄漏 | `history` 任何时刻都不含 Runner 注入的 system message |
+| ctx 忠实 | `ctx` 取消后不再有新的模型调用或工具调用副作用 |
+| 续跑完备 | `(pending tool calls, history, mode)` 足以无歧义恢复运行，无需任何隐藏 checkpoint |
+
+最后一条“续跑完备”把“恢复”从核心的一个*功能*转化为核心的一个*可证明性质*。
+
+## 接缝纪律
+
+最小主义的堕落方向是用“你自己在外面写”逃避难题。区分“顶尖的最小”与“偷懒的最小”，只靠一条规则：
+
+> 核心只为暴露缺失的接缝而改，永远不为实现某个能力而改。
+
+当一个领域难题出现，决策顺序固定：
+
+1. 先在核心之外构造它。能干净写出 ⟶ 接缝足够 ⟶ 发 add-on，核心不动。
+2. 写不出，定位卡点。若因为核心未*暴露*某个本应可见的事实（如续跑所需的 pending calls 未出现在 `Result` 或事件中）⟶ 只增加*那条接缝*（一个字段或一个事件），不增加那个能力。
+3. 永不把 replay / recovery / eval 的*逻辑*放进 `runner`、`agent` 等核心包。
+
+每解决一个难题，核心要么不变，要么变得更薄而准。
+
+## 参考组合
+
+以下 add-on 不进入核心，作为充分性命题的构造性证据存在。它们位于独立的 `x/` 目录，只依赖标准库，且不被核心包反向导入。每个都标注它依赖的接缝、实现方式与所证明的结论。
+
+### 重放（record & replay）
+
+- 依赖接缝：`model.Model` 与 `tool.Tool` 是唯一外部效应入口。
+- 实现：录制为包一层 Model/Tool 记录有序响应日志；重放为注入预录响应、旁路真实调用。
+- 证明：一次运行的全部不确定性可被这两个接口捕获与复现，核心循环本身确定。
+
+```go
+type RecordingModel struct{ Next model.Model; Log *Log }
+type ReplayModel struct{ Log *Log } // 不调用任何真实 provider
+```
+
+### 恢复（durable continuation）
+
+- 依赖接缝：不变量“续跑完备”。
+- 实现：序列化 `(history, mode)`——在安全边界（history 末尾为 tool 结果或 assistant 文本）上，待执行的工具调用已隐式存在于 history 的 assistant `tool_use` 块中，无需单独字段；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
+- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的 HITL 续跑需要一条尚未引入的最小接缝，见 `docs/spec/loop-semantics.md` §7.1。
+- 证明：崩溃恢复、长时运行无需核心新增中断子系统。
+
+### 可观测性（tracing / metrics）
+
+- 依赖接缝：`hooks.Hooks` 触发点确定 + `model.Model` 包装。
+- 实现：在 Before/After 钩子里开启与结束 span，或包装 Model 记录用量。
+- 证明：可观测性是横切关注点，hooks 的确定触发顺序足以承载。
+
+### 预算（cost / token budget）
+
+- 依赖接缝：`model.Model` 包装。
+- 实现：budget-model 装饰器累计用量，超限返回 error，由 Runner 作为运行期错误终止。
+- 证明：成本控制不需要核心理解 provider 计费。
+
+### 评估（eval / 回归）
+
+- 依赖接缝：建立在重放之上。
+- 实现：固定输入 + 预录响应 ⟶ 断言最终 history 或事件序列。
+- 证明：Agent 行为可复现回归测试，是重放的直接推论。
+
 ## 非目标
 
 - 在 SDK 中复刻 Claude Code、OpenCode 或 Codex。

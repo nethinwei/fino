@@ -242,7 +242,7 @@ Implementing your own provider is just satisfying `model.Model` (`Generate` + `S
 | [`examples/multi_mode`](examples/multi_mode) | One agent switching between `plan` and `code` modes |
 | [`examples/streaming`](examples/streaming) | Consuming `Stream` events with visible token-by-token output |
 | [`examples/history_trim`](examples/history_trim) | Wrapping `model.Model` to trim history — the composition pattern, one wrapper for all providers |
-| [`examples/finocode`](examples/finocode) | An interactive coding agent (a zero-dependency take on Claude Code): REPL, y/N tool authorization with write diffs, mode switching, handoff sub-agents, full hooks, and a real `go` toolchain in a temp workspace |
+| [**finocode**](https://github.com/nethinwei/finocode) ↗ | The flagship reference app, in its own repo: a Claude Code-style coding agent built only on fino — REPL, y/N tool authorization with write diffs, mode switching, handoff sub-agents, full hooks, and a real `go` toolchain in a temp workspace. A constructive proof of the sufficiency thesis. |
 
 All examples run against DeepSeek by default:
 
@@ -256,6 +256,24 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/streaming
 By design, fino does **not** include: graph/DAG orchestration · RAG pipelines (loaders, chunking, embeddings, retrieval) · built-in filesystem/bash/web/search/code tools · an MCP implementation · HTTP servers, CLIs, or workers · fixed permission semantics (e.g. `AllowWrite`) · hidden session stores or state machines.
 
 Each of these is better expressed in your code, an example, or an add-on package — composed *with* fino, never bolted *into* it.
+
+## Sufficiency: hard problems without a framework
+
+fino's thesis is that **reliable complex agent capability needs no framework — only correct minimal primitives, precise semantics, and composition.** That claim is made checkable, not just asserted:
+
+- **Precise semantics** — the ReAct loop is specified as a state-transition system in [`docs/spec/loop-semantics.md`](docs/spec/loop-semantics.md), with ten invariants (ordered results, single tool message, OnError-exactly-once, parallel/serial equivalence, …).
+- **Verified, not just tested** — nine of the ten are checked by property-based tests over a thousand-plus random scripts at both serial and parallel concurrency (`runner/invariants_test.go`); the tenth (resume-completeness) is covered by a dedicated seam probe (`runner/recover_seam_test.go`).
+- **Constructive evidence** — the [`x/`](x/) packages solve the field's hard problems entirely outside the core, each as a thin composition over the existing seams:
+
+| Add-on | Problem | Seam it rides on |
+| --- | --- | --- |
+| [`x/replay`](x/replay) | Reproducibility & debugging | `model.Model` + `tool.Tool` are the only effect inputs |
+| [`x/recover`](x/recover) | Crash recovery & durable continuation | the *resume-completeness* invariant (serialize only history + mode) |
+| [`x/trace`](x/trace) | Tracing & observability | deterministic `hooks.Hooks` firing |
+| [`x/budget`](x/budget) | Cost / token budgets | a `model.Model` decorator |
+| [`x/eval`](x/eval) | Reproducible regression testing | a corollary of `x/replay` |
+
+The core never changes to add a capability — only, if ever, to expose a missing seam. See the **seam discipline** in [`docs/design.md`](docs/design.md).
 
 ## Status
 
