@@ -32,7 +32,7 @@ gh pr create --base main --head <branch> --title "..." --body "..."
 
 - 如果误把提交落在本地 `main`：用 `git branch <feature>` 保存，再 `git reset --hard origin/main` 还原 `main`，然后在特性分支上推送、开 PR。
 - 一个 PR 聚焦一件事；文档类改动单独开 PR，不要混进功能 PR。
-- 提交信息遵循 Conventional Commits（`feat(tool): ...`、`docs: ...`）。
+- 提交信息遵循 Conventional Commits（`feat(tool): ...`、`docs: ...`）：英文、祈使句，首行不超过 72 字符（详见 `CONTRIBUTING.md`）。
 
 **TDD 节奏（红 → 绿 → 重构）：** 先写会失败的测试并确认其失败（编译失败也算红），再写最小实现让测试转绿，最后在绿灯下重构。提交前必须 `gofmt -l .` 无输出、`go vet ./...` 与 `go test ./...` 全绿。
 
