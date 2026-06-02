@@ -242,7 +242,7 @@ m, _ := openai.New("gpt-4o",
 | [`examples/multi_mode`](examples/multi_mode) | 同一个 agent 在 `plan` / `code` 之间来回切 |
 | [`examples/streaming`](examples/streaming) | 消费 `Stream` 事件，逐字流式肉眼可见 |
 | [`examples/history_trim`](examples/history_trim) | 包装 `model.Model` 裁剪历史——一个包装器通吃所有 provider 的组合范式 |
-| [`examples/finocode`](examples/finocode) | 一个交互式编码 Agent（对标 Claude Code 的零依赖实现）：REPL 多轮、工具 y/N 授权 + 写文件 diff、mode 切换、handoff 子 agent、全套 hooks，还在临时目录里用真的 `go` 工具链编译运行模型写的代码 |
+| [**finocode**](https://github.com/nethinwei/finocode) ↗ | 旗舰参考应用，已独立成仓：对标 Claude Code、只基于 fino 搭建的编码 Agent——REPL 多轮、工具 y/N 授权 + 写文件 diff、mode 切换、handoff 子 agent、全套 hooks，还在临时目录里用真的 `go` 工具链编译运行模型写的代码。充分性命题的构造性证据。 |
 
 所有示例默认对接 DeepSeek：
 
@@ -256,6 +256,24 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/streaming
 有些东西 fino 是故意不做的：图/DAG 编排、RAG 管道（加载、切块、嵌入、检索）、内置的文件系统/bash/web/搜索/代码执行工具、MCP 协议、HTTP 服务和 CLI/worker、写死的权限语义（比如 `AllowWrite`）、藏在背后的 session store 或状态机。
 
 这些放在业务代码、示例或扩展包里更合适——跟 fino 搭着用，而不是焊死在它身上。
+
+## 充分性：不靠框架也能解决难题
+
+fino 的命题是：**可靠的复杂 Agent 能力不需要框架，只需要正确的最小原语、精确语义和组合。** 这个命题是可被检验的，而不只是口号：
+
+- **精确语义**——ReAct 循环在 [`docs/spec/loop-semantics.md`](docs/spec/loop-semantics.md) 里被定义成一个状态转移系统，配 10 条不变量（结果有序、单条工具消息、OnError 恰好一次、并行/串行等价……）。
+- **是证明，不只是测试**——其中九条由 property-based 测试在串行与并行两种并发下、对上千个随机脚本验证（`runner/invariants_test.go`）；第十条（续跑完备）由专门的接缝探针覆盖（`runner/recover_seam_test.go`）。
+- **构造性证据**——[`x/`](x/) 下的包在核心之外解决了领域里的难题，每个都只是对既有接缝的薄组合：
+
+| Add-on | 难题 | 依赖的接缝 |
+| --- | --- | --- |
+| [`x/replay`](x/replay) | 可复现与调试 | `model.Model` + `tool.Tool` 是唯一外部效应入口 |
+| [`x/recover`](x/recover) | 崩溃恢复与续跑 | “续跑完备”不变量（只序列化 history + mode） |
+| [`x/trace`](x/trace) | tracing 与可观测性 | `hooks.Hooks` 的确定触发顺序 |
+| [`x/budget`](x/budget) | 成本 / token 预算 | `model.Model` 装饰器 |
+| [`x/eval`](x/eval) | 可复现回归测试 | `x/replay` 的直接推论 |
+
+核心永远不为“增加能力”而改，只在确有必要时为“暴露缺失接缝”而改。详见 [`docs/design.md`](docs/design.md) 的**接缝纪律**。
 
 ## 状态
 

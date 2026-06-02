@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Formal loop semantics** — `docs/spec/loop-semantics.md` specifies the ReAct
+  loop as a state-transition system with ten invariants (I1–I10).
+- **Property-based invariant tests** — `runner/invariants_test.go` verifies
+  nine of the ten invariants (I1–I9) over many random scripts at both serial and
+  parallel concurrency, including serial/parallel equivalence; the tenth (I10,
+  resume-completeness) is covered separately by a seam probe
+  (`runner/recover_seam_test.go`).
+- **`x/` reference compositions** — `x/replay`, `x/recover`, `x/trace`,
+  `x/budget`, and `x/eval`: constructive evidence that the core's seams suffice,
+  each standard-library only and never imported by the core.
+- **Design** — sufficiency thesis and seam discipline added to `docs/design.md`.
+
+### Changed
+
+- **finocode extracted** — the flagship coding-agent reference app moved out of
+  `examples/` into its own repository
+  ([nethinwei/finocode](https://github.com/nethinwei/finocode)) so it can grow
+  its own dependencies without affecting fino's standard-library-only core.
+
 ## [0.1.0] - 2026-06-02
 
 First tagged release. A minimal, reliable ReAct agent SDK for Go, built from
