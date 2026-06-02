@@ -41,13 +41,13 @@ fino 只干一件事，并且尽量干好：把让 LLM Agent 真正能用起来�
 ## 能做什么
 
 - **把 ReAct 循环做对**：轮数上限、工具授权、生命周期钩子，以及干净的终止逻辑。
-- **流式就是语义事件**：文本增量、实时思考、工具调用、工具结果、转移，外加一份最终消息快照，统统走 `iter.Seq2`。
+- **流式就是语义事件**：文本增量、实时思考、工具调用、工具结果、转移，每个模型 turn 一份完整 assistant 快照（`TurnMessage`），以及整个 run 一份终态 `FinalMessage`，统统走 `iter.Seq2`。
 - **Mode（模式）**：一个 agent 挂多副人格，各有各的指令、工具和模型参数。
 - **Handoff（转移）**：模型驱动的 agent 间切换，本质上就是一个普通工具。
 - **Policy 随你换**：每次工具执行前都能放行、拒绝或拦下来。
 - **Hooks 看得见**：观测、扩展整个循环，又不用去改它。
 - **并行工具有上界**：单批工具调用里可选并发执行，结果顺序照旧确定。
-- **传输够硬**：内置的 provider 带流式安全的连接超时和退避重试。
+- **传输够韧**：内置的 provider 带流式安全的连接超时和退避重试。
 - **核心零依赖**：除了标准库，啥都不要。
 
 ## 安装
@@ -244,9 +244,10 @@ m, _ := openai.New("gpt-4o",
 | [`examples/multi_mode`](examples/multi_mode) | 同一个 agent 在 `plan` / `code` 之间来回切 |
 | [`examples/streaming`](examples/streaming) | 消费 `Stream` 事件，逐字流式肉眼可见 |
 | [`examples/history_trim`](examples/history_trim) | 包装 `model.Model` 裁剪历史——一个包装器通吃所有 provider 的组合范式 |
+| [`examples/cookbook`](examples/cookbook) | 离线、确定性的难题配方——HITL 审批 + 续跑、有界并行工具、RAG 即工具——外加 MCP 即工具的纯文字指引 |
 | [**finocode**](https://github.com/nethinwei/finocode) ↗ | 旗舰参考应用，已独立成仓：对标 Claude Code、只基于 fino 搭建的编码 Agent——REPL 多轮、工具 y/N 授权 + 写文件 diff、mode 切换、handoff 子 agent、全套 hooks，还在临时目录里用真的 `go` 工具链编译运行模型写的代码。充分性命题的构造性证据。 |
 
-所有示例默认对接 DeepSeek：
+对接 provider 的示例默认走 DeepSeek（[`examples/cookbook`](examples/cookbook) 用内嵌 scripted model，离线即可运行，无需 API key）：
 
 ```bash
 DEEPSEEK_API_KEY=sk-... go run ./examples/streaming

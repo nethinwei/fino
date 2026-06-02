@@ -41,13 +41,13 @@ A capability earns a place in the core only if it is part of the ReAct loop **an
 ## Features
 
 - **ReAct loop, done right** — turn limits, tool authorization, lifecycle hooks, and clean termination.
-- **Streaming as first-class semantic events** — text deltas, live reasoning, tool calls, tool results, handoffs, and a final-message snapshot via `iter.Seq2`.
+- **Streaming as first-class semantic events** — text deltas, live reasoning, tool calls, tool results, handoffs, a complete assistant snapshot per model turn (`TurnMessage`), and one run-terminal `FinalMessage`, all via `iter.Seq2`.
 - **Modes** — one agent, multiple personas (distinct instructions, tools, and model options).
 - **Handoffs** — model-driven transfer between agents, modeled as an ordinary tool.
 - **Pluggable policy** — authorize, deny, or gate every tool call before it runs.
 - **Lifecycle hooks** — observe and extend model calls and tool executions without forking the loop.
 - **Bounded parallel tools** — opt-in concurrent execution within a single tool-call batch, with deterministic ordering.
-- **Production-grade transport** — streaming-safe connection timeouts and retry-with-backoff in the bundled providers.
+- **Resilient transport** — streaming-safe connection timeouts and retry-with-backoff in the bundled providers.
 - **Zero core dependencies** — the standard library, nothing else.
 
 ## Install
@@ -244,9 +244,10 @@ Implementing your own provider is just satisfying `model.Model` (`Generate` + `S
 | [`examples/multi_mode`](examples/multi_mode) | One agent switching between `plan` and `code` modes |
 | [`examples/streaming`](examples/streaming) | Consuming `Stream` events with visible token-by-token output |
 | [`examples/history_trim`](examples/history_trim) | Wrapping `model.Model` to trim history — the composition pattern, one wrapper for all providers |
+| [`examples/cookbook`](examples/cookbook) | Offline, deterministic recipes for the hard problems — HITL approval + resume, bounded parallel tools, RAG-as-a-tool — plus guidance for MCP-as-a-tool |
 | [**finocode**](https://github.com/nethinwei/finocode) ↗ | The flagship reference app, in its own repo: a Claude Code-style coding agent built only on fino — REPL, y/N tool authorization with write diffs, mode switching, handoff sub-agents, full hooks, and a real `go` toolchain in a temp workspace. A constructive proof of the sufficiency thesis. |
 
-All examples run against DeepSeek by default:
+Provider-backed examples run against DeepSeek by default ([`examples/cookbook`](examples/cookbook) uses an in-file scripted model and runs offline, no API key needed):
 
 ```bash
 DEEPSEEK_API_KEY=sk-... go run ./examples/streaming
