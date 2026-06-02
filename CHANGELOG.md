@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-02
+
 ### Added
 
 - **Execution tape** — `x/replay` now records a structured `Log.Events` tape over
@@ -165,6 +167,7 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
+[0.5.0]: https://github.com/nethinwei/fino/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nethinwei/fino/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nethinwei/fino/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nethinwei/fino/compare/v0.2.0...v0.2.1
