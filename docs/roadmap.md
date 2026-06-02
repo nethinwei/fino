@@ -51,7 +51,7 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 | PR | Theme | Output | Version Target |
 | --- | --- | --- | --- |
 | PR0 | Contract scope | Tighten README/design/spec/changelog claims around replay, recovery, and parallelism. | v0.2.1 |
-| PR1 | Tool effects (in progress) | Add `tool.Effects`, `tool.WithEffects`, and surface effects through `policy.Request.Tool`. | v0.3.0 |
+| PR1 | Tool effects | Add `tool.Effects`, `tool.WithEffects`, and surface effects through `policy.Request.Tool`. | v0.3.0 |
 | PR2 | Three-state policy | Add Allow / Deny / Suspend decisions and suspended `runner.Result`. | v0.3.0 |
 | PR3 | Approved resume | Add `SuspendedRun`, `PendingToolCall`, `Approval`, and `Runner.ResumeApproved`. | v0.4.0 |
 | PR4 | Execution tape | Define recorded model, policy, tool, suspension, resume, and termination events. | v0.5.0 |
