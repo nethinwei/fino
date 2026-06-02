@@ -123,16 +123,35 @@ func Messages(messages []message.Message) Input {
 	return Input{messages: append([]message.Message(nil), messages...)}
 }
 
-// Result is the outcome of a completed run.
+// Result is the outcome of a run. A run terminates in one of two successful
+// shapes: a completed run (Suspended == false) carries the final Message; a
+// suspended run (Suspended == true) carries PendingCalls and leaves Message
+// zero. The two are mutually exclusive (loop-semantics I3).
 type Result struct {
 	Message   message.Message
 	Messages  []message.Message
 	LastAgent *agent.Agent
 	LastMode  string
+	// Suspended reports that a Policy suspended the run before executing a tool
+	// batch. The history tail is the dangling assistant tool_use message.
+	Suspended bool
+	// PendingCalls holds the suspended tool calls (only those whose decision
+	// resolved to DecisionSuspend), in call order. It is non-empty only when
+	// Suspended is true.
+	PendingCalls []PendingToolCall
 }
 
 // Text returns the text of the final message.
 func (r *Result) Text() string { return r.Message.Text() }
+
+// PendingToolCall describes a tool call that a Policy suspended. It carries the
+// tool's static info, the original model tool_use, and the Policy's reason, so a
+// caller can present the call for human approval and later resume it.
+type PendingToolCall struct {
+	Tool   tool.Info
+	Call   message.ToolUse
+	Reason string
+}
 
 // RunOption configures a single run.
 type RunOption func(*runConfig)
@@ -217,6 +236,19 @@ func (st *runState) result(msg *message.Message) *Result {
 	}
 }
 
+// suspendedResult builds a suspended Result from the run state and the batch's
+// pending (suspended) calls. The history already ends with the dangling
+// assistant tool_use message, and no tool_result has been appended.
+func (st *runState) suspendedResult(pending []PendingToolCall) *Result {
+	return &Result{
+		Messages:     st.history,
+		LastAgent:    st.agent,
+		LastMode:     st.mode.Name,
+		Suspended:    true,
+		PendingCalls: pending,
+	}
+}
+
 // prepareRun validates the inputs, resolves the starting mode, and returns the
 // initial run state. It is shared by Run and Stream.
 func (r *Runner) prepareRun(a *agent.Agent, input Input, opts []RunOption) (*runState, error) {
@@ -244,11 +276,12 @@ func (r *Runner) prepareRun(a *agent.Agent, input Input, opts []RunOption) (*run
 	}, nil
 }
 
-// authorize consults the policy for a single tool call. It returns a
-// *ToolDeniedError when the policy denies the call, or the policy's own error
-// when the policy itself fails. It is shared by Run and Stream; callers report
-// the error via OnError or the event stream.
-func (r *Runner) authorize(ctx context.Context, st *runState, selected tool.Tool, call message.ToolUse) error {
+// authorize consults the policy for a single tool call. It returns the policy's
+// Decision plus an error: the policy's own error when the policy system fails,
+// or a *ToolDeniedError when the decision resolves to DecisionDeny. An Allow or
+// Suspend decision returns a nil error; callers inspect decision.ResolvedKind()
+// to tell allow from suspend. It is shared by Run and Stream.
+func (r *Runner) authorize(ctx context.Context, st *runState, selected tool.Tool, call message.ToolUse) (policy.Decision, error) {
 	decision, err := r.policy.Authorize(ctx, policy.Request{
 		AgentName: st.agent.Name(),
 		ModeName:  st.mode.Name,
@@ -256,12 +289,12 @@ func (r *Runner) authorize(ctx context.Context, st *runState, selected tool.Tool
 		Input:     call.Input,
 	})
 	if err != nil {
-		return err
+		return decision, err
 	}
-	if !decision.Allow {
-		return &ToolDeniedError{Tool: selected.Info(), Decision: decision}
+	if decision.ResolvedKind() == policy.DecisionDeny {
+		return decision, &ToolDeniedError{Tool: selected.Info(), Decision: decision}
 	}
-	return nil
+	return decision, nil
 }
 
 // execute runs a single authorized tool, firing the BeforeTool and AfterTool
@@ -303,8 +336,12 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 	if err != nil {
 		return nil, err
 	}
-	if ctx, err = r.resumePendingTools(ctx, st); err != nil {
+	ctx, pending, err := r.resumePendingTools(ctx, st)
+	if err != nil {
 		return nil, err
+	}
+	if len(pending) > 0 {
+		return st.suspendedResult(pending), nil
 	}
 	for turn := 0; turn < r.maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
@@ -320,9 +357,12 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 		if len(calls) == 0 {
 			return st.result(msg), nil
 		}
-		ctx, err = r.runToolCalls(ctx, st, calls)
+		ctx, pending, err = r.runToolCalls(ctx, st, calls)
 		if err != nil {
 			return nil, err
+		}
+		if len(pending) > 0 {
+			return st.suspendedResult(pending), nil
 		}
 	}
 	err = fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns)
@@ -335,17 +375,17 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 // seam is off or the tail has no pending tool_use. Executing the pending batch
 // appends its single tool_result message, so the following model turn observes a
 // well-formed history and the ReAct loop continues normally.
-func (r *Runner) resumePendingTools(ctx context.Context, st *runState) (context.Context, error) {
+func (r *Runner) resumePendingTools(ctx context.Context, st *runState) (context.Context, []PendingToolCall, error) {
 	if !st.cfg.resumePending {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	pending := pendingToolUses(st.history)
 	if len(pending) == 0 {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	if err := ctx.Err(); err != nil {
 		r.onError(ctx, err)
-		return ctx, err
+		return ctx, nil, err
 	}
 	return r.runToolCalls(ctx, st, pending)
 }
@@ -370,82 +410,87 @@ func (r *Runner) generate(ctx context.Context, st *runState) (context.Context, *
 	return ctx, msg, nil
 }
 
-// runToolCalls authorizes and executes each requested tool serially, then
-// appends a single RoleTool message holding all results to the run history.
-// When maxConcurrency > 1 and the batch has more than one call, it delegates
-// to runToolCallsParallel.
-func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, error) {
+// runToolCalls authorizes the whole batch first, then executes it. Authorizing
+// before any execution makes the serial and parallel paths equivalent and
+// ensures that a deny or suspend anywhere in the batch produces no side effects
+// (loop-semantics §4, I6). It returns the suspended pending calls (non-empty
+// only when the batch suspended, in which case nothing executed) so the caller
+// can halt with a suspended Result. When maxConcurrency > 1 and the batch has
+// more than one call, it delegates to runToolCallsParallel.
+func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, []PendingToolCall, error) {
 	if r.maxConcurrency > 1 && len(calls) > 1 {
 		return r.runToolCallsParallel(ctx, st, calls)
 	}
 	_, toolsByName := collectTools(st.mode.Tools)
-	blocks := make([]message.Block, 0, len(calls))
-	selected := make([]tool.Tool, 0, len(calls))
-	for _, call := range calls {
-		if err := ctx.Err(); err != nil {
-			r.onError(ctx, err)
-			return ctx, err
-		}
-		newCtx, block, sel, err := r.handleToolCall(ctx, st, toolsByName, call)
-		if err != nil {
-			return ctx, err
-		}
-		ctx = newCtx
-		blocks = append(blocks, block)
-		selected = append(selected, sel)
+	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
+	if err != nil {
+		r.onError(ctx, err)
+		return ctx, nil, err
+	}
+	if len(pending) > 0 {
+		return ctx, pending, nil
+	}
+	ctx, blocks, err := r.executeBatchSerial(ctx, st, selected, calls)
+	if err != nil {
+		return ctx, nil, err
 	}
 	// Apply handoffs only after the whole batch executes, in call order, so all
 	// tools in the batch run under the pre-handoff mode and the serial path
 	// matches the parallel path (loop-semantics §4 equivalence; handoff is
 	// batch-terminal).
 	if err := st.applyHandoffs(selected); err != nil {
-		return ctx, err
+		return ctx, nil, err
 	}
 	st.history = append(st.history, message.ToolResults(blocks...))
-	return ctx, nil
+	return ctx, nil, nil
 }
 
-// handleToolCall resolves, authorizes, and executes one tool call, returning
-// its tool_result block and the selected tool. Handoffs are not applied here;
-// the caller applies them after the batch so attribution stays on the
-// pre-handoff mode.
-func (r *Runner) handleToolCall(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, call message.ToolUse) (context.Context, message.Block, tool.Tool, error) {
-	selected, ok := toolsByName[call.Name]
-	if !ok {
-		err := fmt.Errorf("%w: %q", ErrToolNotFound, call.Name)
-		r.onError(ctx, err)
-		return ctx, message.Block{}, nil, err
+// executeBatchSerial runs every authorized tool in call order, returning the
+// tool_result blocks. It fires OnError on the first execution failure.
+func (r *Runner) executeBatchSerial(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse) (context.Context, []message.Block, error) {
+	blocks := make([]message.Block, 0, len(calls))
+	for i, call := range calls {
+		if err := ctx.Err(); err != nil {
+			r.onError(ctx, err)
+			return ctx, nil, err
+		}
+		newCtx, out, err := r.execute(ctx, st, selected[i], call)
+		if err != nil {
+			r.onError(ctx, err)
+			return ctx, nil, err
+		}
+		ctx = newCtx
+		blocks = append(blocks, message.NewToolResult(call.ID, call.Name, out.Content, out.IsError))
 	}
-	if err := r.authorize(ctx, st, selected, call); err != nil {
-		r.onError(ctx, err)
-		return ctx, message.Block{}, nil, err
-	}
-	ctx, out, err := r.execute(ctx, st, selected, call)
-	if err != nil {
-		r.onError(ctx, err)
-		return ctx, message.Block{}, nil, err
-	}
-	block := message.NewToolResult(call.ID, call.Name, out.Content, out.IsError)
-	return ctx, block, selected, nil
+	return ctx, blocks, nil
 }
 
 // authorizeBatch resolves and authorizes every call serially in call order.
 // Resolving and authorizing stay serial so Policy ordering is deterministic and
-// the batch fails fast on the first missing or denied tool, exactly as the
-// serial path does. It returns the selected tools indexed by call order.
-func (r *Runner) authorizeBatch(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, calls []message.ToolUse) ([]tool.Tool, error) {
+// the batch fails fast on the first missing or denied tool. Suspends do not
+// short-circuit: the loop continues so a later deny still takes precedence over
+// an earlier suspend. It returns the selected tools (indexed by call order) and
+// the suspended calls collected in call order. When the returned pending slice
+// is non-empty, the batch suspended and the caller must not execute it.
+func (r *Runner) authorizeBatch(ctx context.Context, st *runState, toolsByName map[string]tool.Tool, calls []message.ToolUse) ([]tool.Tool, []PendingToolCall, error) {
 	selected := make([]tool.Tool, len(calls))
+	var pending []PendingToolCall
 	for i, call := range calls {
 		t, ok := toolsByName[call.Name]
 		if !ok {
-			return nil, fmt.Errorf("%w: %q", ErrToolNotFound, call.Name)
+			return nil, nil, fmt.Errorf("%w: %q", ErrToolNotFound, call.Name)
 		}
-		if err := r.authorize(ctx, st, t, call); err != nil {
-			return nil, err
+		decision, err := r.authorize(ctx, st, t, call)
+		if err != nil {
+			return nil, nil, err
+		}
+		if decision.ResolvedKind() == policy.DecisionSuspend {
+			pending = append(pending, PendingToolCall{Tool: t.Info(), Call: call, Reason: decision.Reason})
+			continue
 		}
 		selected[i] = t
 	}
-	return selected, nil
+	return selected, pending, nil
 }
 
 // errSiblingFailed is the cancellation cause used to stop sibling tools after
@@ -470,23 +515,26 @@ type toolOutcome struct {
 // tools concurrently (bounded by maxConcurrency), appends one RoleTool message
 // with results in call order, and applies handoffs in call order. The first
 // error by call order cancels siblings and is returned.
-func (r *Runner) runToolCallsParallel(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, error) {
+func (r *Runner) runToolCallsParallel(ctx context.Context, st *runState, calls []message.ToolUse) (context.Context, []PendingToolCall, error) {
 	_, toolsByName := collectTools(st.mode.Tools)
-	selected, err := r.authorizeBatch(ctx, st, toolsByName, calls)
+	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
 	if err != nil {
 		r.onError(ctx, err)
-		return ctx, err
+		return ctx, nil, err
+	}
+	if len(pending) > 0 {
+		return ctx, pending, nil
 	}
 	outcomes := r.executeParallel(ctx, st, selected, calls)
 	if err := r.firstBatchError(ctx, outcomes); err != nil {
 		r.onError(ctx, err)
-		return ctx, err
+		return ctx, nil, err
 	}
 	if err := st.applyHandoffs(selected); err != nil {
-		return ctx, err
+		return ctx, nil, err
 	}
 	st.history = append(st.history, message.ToolResults(resultBlocks(calls, outcomes)...))
-	return ctx, nil
+	return ctx, nil, nil
 }
 
 // firstBatchError returns the batch's terminating error matching the serial
