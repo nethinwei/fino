@@ -17,6 +17,25 @@ gofmt -w .                     # 格式化代码
 
 技术栈：Go 1.23+，核心仅依赖标准库，TDD 开发流程。
 
+## 开发与提交流程
+
+**`main` 受保护，禁止直接 commit/push 到 `main`（GitHub 强制 PR 模式）。** 所有改动必须走 PR：
+
+```bash
+git checkout main && git pull          # 从最新 main 起步
+git checkout -b <type>/<topic>          # 例如 feat/tool-effects、docs/dev-workflow
+# ... 开发并提交到该分支 ...
+git push -u origin <branch>
+gh pr create --base main --head <branch> --title "..." --body "..."
+# CI 通过、review 后 squash 合并
+```
+
+- 如果误把提交落在本地 `main`：用 `git branch <feature>` 保存，再 `git reset --hard origin/main` 还原 `main`，然后在特性分支上推送、开 PR。
+- 一个 PR 聚焦一件事；文档类改动单独开 PR，不要混进功能 PR。
+- 提交信息遵循 Conventional Commits（`feat(tool): ...`、`docs: ...`）：英文、祈使句，首行不超过 72 字符（详见 `CONTRIBUTING.md`）。
+
+**TDD 节奏（红 → 绿 → 重构）：** 先写会失败的测试并确认其失败（编译失败也算红），再写最小实现让测试转绿，最后在绿灯下重构。提交前必须 `gofmt -l .` 无输出、`go vet ./...` 与 `go test ./...` 全绿。
+
 ## 架构
 
 核心由 7 个包组成，各自职责单一：

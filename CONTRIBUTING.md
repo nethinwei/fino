@@ -135,5 +135,5 @@ Provider 适配器（providers/）可以引入第三方 SDK，但不在初始核
 1. 确保所有测试通过：`go test ./...`
 2. 格式化代码：`gofmt -w .`
 3. 检查不应存在的路径（graph/rag/session/mcp/tools/filesystem/tools/bash/providers/）
-4. 提交信息用英文，祈使句，首行不超过 72 字符
+4. 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)（如 `feat(tool): ...`、`docs: ...`）：用英文、祈使句，首行不超过 72 字符
 5. 不自动提交，需人工确认
