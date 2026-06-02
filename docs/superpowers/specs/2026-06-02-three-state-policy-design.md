@@ -98,11 +98,13 @@ New flow:
 3. execute all authorized calls (serial or parallel, no change)
 ```
 
-This is a structural change only for the serial path. The parallel path already separates authorize and execute phases.
+This is a structural change for the serial path. The parallel path already separates authorize and execute phases.
+
+**Behavioral tightening for serial deny**: The serial refactor introduces a real behavior change for deny at higher call indices. Previously, `handleToolCall` executed each call immediately after authorization, so call₁=Allow would produce side effects before call₂=Deny halted the batch. After the refactor, `authorizeBatch` authorizes all calls before any execution, so call₁ is never executed when call₂=Deny. This is an improvement: it makes the serial and parallel paths truly equivalent (I6 — protocol-trace equivalence), since the parallel path has always authorized the full batch before execution. The trade-off is that previously-allowed-but-later-denied calls no longer execute. This is the correct semantics for a Policy that acts as a gate: if any call in the batch is denied, no call in that batch should produce side effects.
 
 For the serial path, the change is:
-- Before: `handleToolCall` does resolve + authorize + execute as one unit.
-- After: split into `authorizeBatch` (shared with parallel) → suspend check → `executeBatch`.
+- Before: `handleToolCall` does resolve + authorize + execute as one unit per call. Side effects from earlier allowed calls are visible before a later deny.
+- After: split into `authorizeBatch` (shared with parallel) → suspend check → `executeBatch`. No side effects are produced if any call is denied or suspended.
 
 ### D6: Decision.Allow soft-deprecated
 
@@ -140,9 +142,18 @@ Returns `d.Kind` if not `DecisionUnspecified`; otherwise maps `Allow: true → D
 | Update `authorizeBatch` | Return `([]Decision, error)`, check for suspend/deny |
 | Suspend halt path | Build `Result` with `Suspended: true` and `PendingCalls` from suspended decisions |
 
-### runner/stream.go (if present)
+### runner/runner_stream.go — out of scope for PR2
 
-Same suspend logic as `Run`: yield a `FinalMessage` event with the suspended Result, then stop iteration. No `StreamError` event. `OnError` is not triggered.
+Stream suspend is **not** implemented in PR2. The `Stream` method returns `iter.Seq2[Event, error]` and has no `Result` return path. Suspending in `Stream` requires a new event type (distinct from `FinalMessage`, which is defined only for the last turn with no tool calls — loop-semantics §5). Emitting `FinalMessage` on a suspend turn would violate the v0.3 event contract by creating dual semantics for `FinalMessage`.
+
+When a `DecisionSuspend` is encountered during `Stream`, the Runner must still produce a well-defined outcome. PR2's behavior: `Stream` treats `DecisionSuspend` identically to `DecisionDeny` — it returns a `ToolDeniedError` wrapping the suspended `Decision`. This is a deliberate downgrade within `Stream` only; `Run` gets full suspend semantics. This limitation is documented and will be lifted in a future PR that introduces a proper suspended stream event.
+
+**Why not a new event type now?** Adding a `Suspended` event type to `model.Event` would expand the event contract, requiring updates to `loop-semantics §5`, all stream consumers, and the parallel-path stream logic. This is too much surface area for PR2, which is focused on the `Policy` and `Run` path. The "one seam at a time" discipline applies.
+
+| Path | DecisionSuspend behavior |
+|------|--------------------------|
+| `Run` | Returns `Result{Suspended: true, PendingCalls: [...]}` |
+| `Stream` | Returns `ToolDeniedError` (suspend treated as deny) |
 
 ### docs/spec/loop-semantics.md
 
@@ -200,6 +211,7 @@ Same suspend logic as `Run`: yield a `FinalMessage` event with the suspended Res
 - Execution tape recording of suspend/resume events (PR4)
 - Effect-aware concurrency changes from suspend (PR5)
 - Batch partitioning (allowing partial execution when some calls are suspended)
+- Stream suspend event type (extending `model.Event` with a `Suspended` event; PR2 downgrades `DecisionSuspend` to deny in `Stream` only)
 
 ## Test Plan
 
@@ -214,5 +226,7 @@ Same suspend logic as `Run`: yield a `FinalMessage` event with the suspended Res
 9. **Integration: suspended Result has correct history** — `Result.Messages` ends with the assistant message containing the `tool_use` blocks.
 10. **Integration: parallel path suspend** — `authorizeBatch` in parallel path also suspends on `DecisionSuspend`.
 11. **Integration: Allow + Suspend mixed batch** — Batch with call₁=Allow, call₂=Suspend → `Result{Suspended: true}`, `PendingCalls` contains only call₂, `Result.Messages` ends with assistant message containing both `tool_use` blocks, no `tool_result` follows.
-12. **Integration: deny fail-fast after refactor** — call₁=Deny → `authorizeBatch` returns `ToolDeniedError`; call₂ is never resolved or authorized (Policy.Authorize not called for call₂). This verifies the serial-to-batch refactor preserves deny fail-fast.
-13. **Property: I3 updated** — `Run` output ∈ {Completed Result, Suspended Result, error}, mutually exclusive.
+12. **Integration: deny fail-fast after refactor** — call₁=Deny → `authorizeBatch` returns `ToolDeniedError`; call₂ is never resolved or authorized (Policy.Authorize not called for call₂). This verifies the serial-to-batch refactor preserves deny fail-fast at index 0.
+13. **Integration: deny prevents earlier-allowed execution** — call₁=Allow, call₂=Deny → `authorizeBatch` returns `ToolDeniedError`; call₁ tool is not executed (BeforeTool/AfterTool hook count for call₁ is 0). This verifies the behavioral tightening: authorize-all-before-execute prevents side effects from calls that would have run under the old per-call serial flow.
+14. **Integration: Stream treats suspend as deny** — `Stream` with `DecisionSuspend` returns `ToolDeniedError` (not a suspended Result).
+15. **Property: I3 updated** — `Run` output ∈ {Completed Result, Suspended Result, error}, mutually exclusive.
