@@ -171,7 +171,13 @@ I10 是“恢复”能力的语义基础，但它**不要求核心实现恢复**
 I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 `runner/recover_seam_test.go`）：
 
 - **安全边界恢复**（history 末尾是 user/tool 消息或 assistant 文本消息）：无需任何核心改动。对持久化的 history 重新 `Run` 即可正确续跑。这是 `x/recover` 的实现契约。
-- **批次中途 / 人工确认（HITL）恢复**（history 末尾是仅含 `tool_use` 而无 `tool_result` 的 dangling assistant 消息）：当前 `[T-MODEL]` 总是先调用模型，不会“先执行 history 末尾的待办工具再继续”，因此不可直接续跑。探针确认了这一行为。支持它需要新增**最小接缝**（例如 `WithResumeFromPendingTools` 这一 RunOption），按“接缝纪律”这属于*暴露接缝*而非*实现能力*；**该接缝暂不引入，留待显式签字**。在此之前，应用应在安全边界做快照，或在收集人工确认后用同一段（不含 dangling `tool_use` 的）history 重新 `Run`，由模型重新发起被批准的工具调用。
+- **批次中途 / 人工确认（HITL）恢复**（history 末尾是含至少一个 `tool_use`、且其后无对应 `tool_result` 的 dangling assistant 消息）：默认 `[T-MODEL]` 总是先调用模型，不会“先执行 history 末尾的待办工具再继续”，因此默认不可直接续跑。为此暴露**唯一的最小接缝** `WithResumeFromPendingTools()`（RunOption）：
+
+  - **检测**：pending = 末条消息为 `RoleAssistant` 且含 ≥1 个 `tool_use` 时该消息的全部 `tool_use`；不要求该 assistant 消息仅含 `tool_use`（允许与 thinking/text 混排）。否则无 pending。
+  - **转移**：启用该接缝且存在 pending 时，在进入循环前先对 pending 执行一次 `[T-TOOLS]`（授权 → 执行 → 追加单条 `RoleTool` 消息；`Stream` 同时发出 `ToolCall`/`ToolResult`/批末 `Handoff`），随后照常进入 `[T-MODEL]`。关闭（默认）或无 pending 时为 no-op，行为与未启用时完全一致。
+  - **纪律**：这是*暴露接缝*而非*实现能力*——不引入 checkpoint / session / graph 概念，恢复所需状态仍只是 history + mode。`x/recover` 的 `Snapshot.Resume` 可经 `runner.WithResumeFromPendingTools()` 透传以覆盖该边界；推荐直接用便捷入口 `Snapshot.ResumePending`，它已内置该接缝。
+
+  探针 `runner/recover_seam_test.go` 同时固定两侧行为：默认不自动执行 dangling 工具；启用接缝后执行之。
 
 ## 8. 一致性义务
 
