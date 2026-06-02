@@ -45,6 +45,39 @@ func TestNewFuncResultReturn(t *testing.T) {
 	}
 }
 
+func TestWithEffectsPopulatesInfo(t *testing.T) {
+	want := Effects{
+		ReadOnly:         true,
+		Idempotent:       true,
+		ParallelSafe:     true,
+		Destructive:      true,
+		ExternalWrite:    true,
+		RequiresApproval: true,
+		SensitiveInput:   true,
+		SensitiveOutput:  true,
+	}
+	search, err := NewFunc("search", "Search docs",
+		func(ctx context.Context, in searchInput) (string, error) { return "", nil },
+		WithEffects(want))
+	if err != nil {
+		t.Fatalf("NewFunc error: %v", err)
+	}
+	if got := search.Info().Effects; got != want {
+		t.Fatalf("Effects = %+v, want %+v", got, want)
+	}
+}
+
+func TestEffectsZeroValueWhenUnspecified(t *testing.T) {
+	search, err := NewFunc("search", "Search docs",
+		func(ctx context.Context, in searchInput) (string, error) { return "", nil })
+	if err != nil {
+		t.Fatalf("NewFunc error: %v", err)
+	}
+	if got := search.Info().Effects; got != (Effects{}) {
+		t.Fatalf("Effects = %+v, want zero value", got)
+	}
+}
+
 func TestNewFuncRejectsMissingName(t *testing.T) {
 	_, err := NewFunc("", "Search docs", func(ctx context.Context, in searchInput) (string, error) { return "", nil })
 	if err == nil {
