@@ -786,7 +786,7 @@ type ReplayModel struct{ Log *Log } // 不调用任何真实 provider
 
 - 依赖接缝：不变量“续跑完备”。
 - 实现：序列化 `(history, mode)`——在安全边界（history 末尾为 tool 结果或 assistant 文本）上，待执行的工具调用已隐式存在于 history 的 assistant `tool_use` 块中，无需单独字段；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
-- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的 HITL 续跑需要一条尚未引入的最小接缝，见 `docs/spec/loop-semantics.md` §7.1。
+- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的 HITL 续跑由唯一的最小接缝 `runner.WithResumeFromPendingTools()`（RunOption）支持：默认关闭、行为不变；opt-in 时在首个模型 turn 前先执行 history 末尾的 pending tools。它仍只暴露接缝、不引入 checkpoint/session/graph，`x/recover` 的 `Snapshot.ResumePending` 透传该接缝。见 `docs/spec/loop-semantics.md` §7.2。
 - 证明：崩溃恢复、长时运行无需核心新增中断子系统。
 
 ### 可观测性（tracing / metrics）

@@ -109,6 +109,51 @@ func TestCrashRecoveryAtSafeBoundary(t *testing.T) {
 	}
 }
 
+// TestResumePendingAtMidBatch proves the mid-batch / HITL boundary: a snapshot
+// captured at a dangling assistant tool_use (no results) resumes to the same
+// final state as an uninterrupted run via ResumePending, which drives the core's
+// WithResumeFromPendingTools seam. No checkpoint type and no extra core concept.
+func TestResumePendingAtMidBatch(t *testing.T) {
+	// Uninterrupted reference run.
+	full := &scriptedProvider{resp: []message.Message{
+		message.Assistant(message.NewToolUse("c1", "alpha", json.RawMessage(`{}`))),
+		message.Assistant(message.NewText("done")),
+	}}
+	rFull, err := runner.New(full)
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	want, err := rFull.Run(context.Background(), buildAgent(t), runner.Text("go"))
+	if err != nil {
+		t.Fatalf("full Run: %v", err)
+	}
+
+	// Persisted state captured mid-batch: the model requested a tool but it has
+	// not run yet (e.g. paused for human approval). This is NOT a safe boundary.
+	persisted := []message.Message{
+		message.UserText("go"),
+		message.Assistant(message.NewToolUse("c1", "alpha", json.RawMessage(`{}`))),
+	}
+	snap := recover.FromHistory(persisted, "default")
+
+	// Resume: the pending tool runs first, then only the final model turn remains.
+	resume := &scriptedProvider{resp: []message.Message{
+		message.Assistant(message.NewText("done")),
+	}}
+	rResume, err := runner.New(resume)
+	if err != nil {
+		t.Fatalf("runner.New resume: %v", err)
+	}
+	got, err := snap.ResumePending(context.Background(), rResume, buildAgent(t))
+	if err != nil {
+		t.Fatalf("ResumePending: %v", err)
+	}
+
+	if !reflect.DeepEqual(got.Messages, want.Messages) {
+		t.Fatalf("resume did not match uninterrupted run\n got: %v\nwant: %v", got.Messages, want.Messages)
+	}
+}
+
 // TestSnapshotHoldsOnlyHistoryAndMode guards the boundary: Snapshot must not
 // grow into a checkpoint/graph type. It has exactly two fields.
 func TestSnapshotHoldsOnlyHistoryAndMode(t *testing.T) {

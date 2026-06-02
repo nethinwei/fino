@@ -138,8 +138,9 @@ func (r *Result) Text() string { return r.Message.Text() }
 type RunOption func(*runConfig)
 
 type runConfig struct {
-	modeName  string
-	modelOpts []model.Option
+	modeName      string
+	modelOpts     []model.Option
+	resumePending bool
 }
 
 // WithMode selects which mode of the Agent to start the run in. The default is
@@ -149,6 +150,22 @@ func WithMode(name string) RunOption { return func(c *runConfig) { c.modeName = 
 // WithModelOptions appends model options applied after the mode's own defaults.
 func WithModelOptions(opts ...model.Option) RunOption {
 	return func(c *runConfig) { c.modelOpts = append(c.modelOpts, opts...) }
+}
+
+// WithResumeFromPendingTools makes a run first execute any pending tool calls at
+// the tail of the input history before calling the model. Pending calls are the
+// tool_uses of the last message when it is an assistant message that carries at
+// least one tool_use and therefore has no following tool_result message.
+//
+// This is the minimal seam for mid-batch / human-in-the-loop resume identified
+// by invariant I10 (see docs/spec/loop-semantics.md §7.2): it exposes the
+// ability to continue a run that was interrupted after the model requested tools
+// but before they ran (e.g. while awaiting human approval), without introducing
+// any checkpoint, session, or graph concept. When the seam is off (the default)
+// or the tail has no pending tool_use, it is a no-op and the run starts at the
+// model as usual.
+func WithResumeFromPendingTools() RunOption {
+	return func(c *runConfig) { c.resumePending = true }
 }
 
 // runState holds the mutable state of a single run: the active agent and its
@@ -260,6 +277,23 @@ func (r *Runner) execute(ctx context.Context, st *runState, selected tool.Tool, 
 	return ctx, out, nil
 }
 
+// pendingToolUses returns the pending tool calls at the tail of history: the
+// tool_uses of the last message when it is an assistant message carrying at
+// least one tool_use. Because such a message is last, it has no following
+// tool_result message, so all its tool_uses are unresolved. The detection does
+// not require the assistant message to contain only tool_use blocks (real
+// providers interleave thinking/text with tool_use). It returns nil otherwise.
+func pendingToolUses(history []message.Message) []message.ToolUse {
+	if len(history) == 0 {
+		return nil
+	}
+	last := history[len(history)-1]
+	if last.Role != message.RoleAssistant {
+		return nil
+	}
+	return last.ToolUses()
+}
+
 // Run executes the ReAct loop until the model returns a message with no tool
 // calls, the turn limit is reached, or an error occurs. It returns an error if
 // the agent is nil, the input contains a system message, or the selected mode
@@ -267,6 +301,9 @@ func (r *Runner) execute(ctx context.Context, st *runState, selected tool.Tool, 
 func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...RunOption) (*Result, error) {
 	st, err := r.prepareRun(a, input, opts)
 	if err != nil {
+		return nil, err
+	}
+	if ctx, err = r.resumePendingTools(ctx, st); err != nil {
 		return nil, err
 	}
 	for turn := 0; turn < r.maxTurns; turn++ {
@@ -291,6 +328,26 @@ func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...R
 	err = fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns)
 	r.onError(ctx, err)
 	return nil, err
+}
+
+// resumePendingTools executes the input history's tail pending tool calls before
+// the loop, when the resume-from-pending seam is enabled. It is a no-op when the
+// seam is off or the tail has no pending tool_use. Executing the pending batch
+// appends its single tool_result message, so the following model turn observes a
+// well-formed history and the ReAct loop continues normally.
+func (r *Runner) resumePendingTools(ctx context.Context, st *runState) (context.Context, error) {
+	if !st.cfg.resumePending {
+		return ctx, nil
+	}
+	pending := pendingToolUses(st.history)
+	if len(pending) == 0 {
+		return ctx, nil
+	}
+	if err := ctx.Err(); err != nil {
+		r.onError(ctx, err)
+		return ctx, err
+	}
+	return r.runToolCalls(ctx, st, pending)
 }
 
 // generate builds the model input from the run state, invokes the model, fires
