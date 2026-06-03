@@ -18,8 +18,18 @@ const (
 	EventToolCallEnd        EventType = "TOOL_CALL_END"
 	EventToolCallResult     EventType = "TOOL_CALL_RESULT"
 	EventMessagesSnapshot   EventType = "MESSAGES_SNAPSHOT"
+	EventStateSnapshot      EventType = "STATE_SNAPSHOT"
+	EventStateDelta         EventType = "STATE_DELTA"
+	EventActivitySnapshot   EventType = "ACTIVITY_SNAPSHOT"
+	EventActivityDelta      EventType = "ACTIVITY_DELTA"
 	EventRaw                EventType = "RAW"
 	EventCustom             EventType = "CUSTOM"
+
+	EventReasoningStart          EventType = "REASONING_START"
+	EventReasoningMessageStart   EventType = "REASONING_MESSAGE_START"
+	EventReasoningMessageContent EventType = "REASONING_MESSAGE_CONTENT"
+	EventReasoningMessageEnd     EventType = "REASONING_MESSAGE_END"
+	EventReasoningEnd            EventType = "REASONING_END"
 )
 
 // Role is an AG-UI message role.
@@ -235,6 +245,80 @@ type MessagesSnapshotEvent struct {
 	Messages []Message `json:"messages"`
 }
 
+// JSONPatchOp is one RFC 6902 JSON Patch operation. State and activity deltas
+// carry an ordered list of these to describe an incremental update. Value is
+// omitted for ops that do not carry one (e.g. "remove"); From is set only for
+// "move" and "copy".
+type JSONPatchOp struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value,omitempty"`
+	From  string `json:"from,omitempty"`
+}
+
+// StateSnapshotEvent delivers a complete snapshot of the agent's shared state.
+type StateSnapshotEvent struct {
+	BaseEvent
+	Snapshot any `json:"snapshot"`
+}
+
+// StateDeltaEvent applies an incremental update to shared state as a JSON Patch.
+type StateDeltaEvent struct {
+	BaseEvent
+	Delta []JSONPatchOp `json:"delta"`
+}
+
+// ActivitySnapshotEvent delivers a complete snapshot of an activity message.
+// Replace defaults to true on the client when omitted.
+type ActivitySnapshotEvent struct {
+	BaseEvent
+	MessageID    string `json:"messageId"`
+	ActivityType string `json:"activityType"`
+	Content      any    `json:"content"`
+	Replace      *bool  `json:"replace,omitempty"`
+}
+
+// ActivityDeltaEvent applies an incremental update to an existing activity
+// message as a JSON Patch.
+type ActivityDeltaEvent struct {
+	BaseEvent
+	MessageID    string        `json:"messageId"`
+	ActivityType string        `json:"activityType"`
+	Patch        []JSONPatchOp `json:"patch"`
+}
+
+// ReasoningStartEvent signals the start of a reasoning sequence.
+type ReasoningStartEvent struct {
+	BaseEvent
+	MessageID string `json:"messageId"`
+}
+
+// ReasoningMessageStartEvent signals the start of one reasoning message.
+type ReasoningMessageStartEvent struct {
+	BaseEvent
+	MessageID string `json:"messageId"`
+	Role      string `json:"role"`
+}
+
+// ReasoningMessageContentEvent carries an incremental reasoning fragment.
+type ReasoningMessageContentEvent struct {
+	BaseEvent
+	MessageID string `json:"messageId"`
+	Delta     string `json:"delta"`
+}
+
+// ReasoningMessageEndEvent signals the end of one reasoning message.
+type ReasoningMessageEndEvent struct {
+	BaseEvent
+	MessageID string `json:"messageId"`
+}
+
+// ReasoningEndEvent signals the end of a reasoning sequence.
+type ReasoningEndEvent struct {
+	BaseEvent
+	MessageID string `json:"messageId"`
+}
+
 // RawEvent carries an implementation-specific event.
 type RawEvent struct {
 	BaseEvent
@@ -249,18 +333,27 @@ type CustomEvent struct {
 	Value any    `json:"value,omitempty"`
 }
 
-func (RunStartedEvent) event()         {}
-func (RunFinishedEvent) event()        {}
-func (RunErrorEvent) event()           {}
-func (StepStartedEvent) event()        {}
-func (StepFinishedEvent) event()       {}
-func (TextMessageStartEvent) event()   {}
-func (TextMessageContentEvent) event() {}
-func (TextMessageEndEvent) event()     {}
-func (ToolCallStartEvent) event()      {}
-func (ToolCallArgsEvent) event()       {}
-func (ToolCallEndEvent) event()        {}
-func (ToolCallResultEvent) event()     {}
-func (MessagesSnapshotEvent) event()   {}
-func (RawEvent) event()                {}
-func (CustomEvent) event()             {}
+func (RunStartedEvent) event()              {}
+func (RunFinishedEvent) event()             {}
+func (RunErrorEvent) event()                {}
+func (StepStartedEvent) event()             {}
+func (StepFinishedEvent) event()            {}
+func (TextMessageStartEvent) event()        {}
+func (TextMessageContentEvent) event()      {}
+func (TextMessageEndEvent) event()          {}
+func (ToolCallStartEvent) event()           {}
+func (ToolCallArgsEvent) event()            {}
+func (ToolCallEndEvent) event()             {}
+func (ToolCallResultEvent) event()          {}
+func (MessagesSnapshotEvent) event()        {}
+func (StateSnapshotEvent) event()           {}
+func (StateDeltaEvent) event()              {}
+func (ActivitySnapshotEvent) event()        {}
+func (ActivityDeltaEvent) event()           {}
+func (ReasoningStartEvent) event()          {}
+func (ReasoningMessageStartEvent) event()   {}
+func (ReasoningMessageContentEvent) event() {}
+func (ReasoningMessageEndEvent) event()     {}
+func (ReasoningEndEvent) event()            {}
+func (RawEvent) event()                     {}
+func (CustomEvent) event()                  {}

@@ -142,6 +142,10 @@ func (m *Mapper) mapTurnMessage(msg message.Message) ([]Event, error) {
 		seen[call.ID] = struct{}{}
 	}
 	events := make([]Event, 0, 1+len(calls)*3)
+	// Reasoning precedes the assistant's answer. fino only carries reasoning as
+	// thinking blocks the provider already surfaced, so an absent block yields no
+	// reasoning events and no hidden chain-of-thought is invented.
+	events = append(events, m.reasoningEvents(msg)...)
 	parentMessageID := m.textMessageID
 	if m.textMessageID != "" {
 		fullText := msg.Text()
@@ -171,6 +175,54 @@ func (m *Mapper) mapTurnMessage(msg message.Message) ([]Event, error) {
 		events = append(events, toolCallEvents(call, parentMessageID)...)
 	}
 	return events, nil
+}
+
+// reasoningEvents maps the thinking blocks of one assistant turn into a single
+// REASONING sequence: a START/END pair wrapping one MESSAGE_START/CONTENT/END
+// trio per thinking block. fino TurnMessages are snapshots, not streamed, so the
+// full thinking text arrives in one CONTENT event. Empty thinking blocks are
+// skipped; a turn with no thinking text produces no reasoning events at all.
+func (m *Mapper) reasoningEvents(msg message.Message) []Event {
+	var texts []string
+	for _, block := range msg.Content {
+		if block.Type == message.TypeThinking && block.Text != "" {
+			texts = append(texts, block.Text)
+		}
+	}
+	if len(texts) == 0 {
+		return nil
+	}
+	// Use one shared ID for the outer REASONING_START/END envelope, but give
+	// each individual thinking block its own message ID so the client state
+	// machine never sees the same ID opened twice without closing first.
+	envelopeID := m.nextMessageID()
+	events := []Event{ReasoningStartEvent{
+		BaseEvent: BaseEvent{Type: EventReasoningStart},
+		MessageID: envelopeID,
+	}}
+	for _, text := range texts {
+		msgID := m.nextMessageID()
+		events = append(events,
+			ReasoningMessageStartEvent{
+				BaseEvent: BaseEvent{Type: EventReasoningMessageStart},
+				MessageID: msgID,
+				Role:      string(RoleReasoning),
+			},
+			ReasoningMessageContentEvent{
+				BaseEvent: BaseEvent{Type: EventReasoningMessageContent},
+				MessageID: msgID,
+				Delta:     text,
+			},
+			ReasoningMessageEndEvent{
+				BaseEvent: BaseEvent{Type: EventReasoningMessageEnd},
+				MessageID: msgID,
+			},
+		)
+	}
+	return append(events, ReasoningEndEvent{
+		BaseEvent: BaseEvent{Type: EventReasoningEnd},
+		MessageID: envelopeID,
+	})
 }
 
 func validateAssistantBlocks(blocks []message.Block) error {
@@ -254,7 +306,12 @@ func (m *Mapper) mapToolResult(e model.ToolResult) ([]Event, error) {
 }
 
 func toolResultContent(blocks []message.Block) string {
-	if len(blocks) == 1 && blocks[0].Type == message.TypeText && blocks[0].Text != "" {
+	if len(blocks) == 1 && blocks[0].Type == message.TypeText {
+		// Empty text block is semantically equivalent to no content; normalise
+		// to "[]" so clients see a consistent representation in both cases.
+		if blocks[0].Text == "" {
+			return "[]"
+		}
 		return blocks[0].Text
 	}
 	if len(blocks) == 0 {

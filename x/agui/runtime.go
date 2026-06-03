@@ -120,6 +120,19 @@ func (rt *Runtime) streamRun(ctx context.Context, yield func(Event, error) bool,
 // terminal RUN_FINISHED. Resume fails closed when no SuspendStore is configured
 // or no snapshot exists for the thread, so a forged history cannot execute an
 // unauthorized tool.
+//
+// Known adapter gaps (Phase 6 completeness audit):
+//
+//   - Handoff continuity: if the suspension occurred after a handoff, ResumeApproved
+//     returns runner.ErrResumeAgentMismatch because this method always passes the
+//     root agent (rt.a). The error surfaces as RUN_ERROR (fail-closed). Supporting
+//     arbitrary handoff chains requires agent-tree resolution (missing core seam).
+//
+//   - Frontend-defined tools: AG-UI allows RunAgentInput.Tools to supply tool
+//     definitions that the frontend executes. This path requires a Policy-initiated
+//     DecisionSuspend before a SuspendedRun exists. Without Policy cooperation the
+//     adapter cannot create one (missing core seam #1: external/deferred tool
+//     execution from the design document).
 func (rt *Runtime) streamResume(ctx context.Context, yield func(Event, error) bool, mapper *Mapper, resume []ResumeEntry, opts []runner.RunOption) {
 	if rt.store == nil {
 		yield(runErrEvent(mapper.runID, ErrResumeUnavailable), ErrResumeUnavailable)
@@ -151,8 +164,19 @@ func (rt *Runtime) streamResume(ctx context.Context, yield func(Event, error) bo
 		// A post-resume turn requested another tool the Policy suspended. Persist
 		// the new snapshot under the same thread so the client can resume again,
 		// and report an interrupt rather than a completion. The snapshot is kept,
-		// not deleted. LastAgentName/LastMode/RunID are unchanged: ResumeApproved
-		// cannot switch mode and keeps the suspended run ID.
+		// not deleted.
+		//
+		// LastAgentName and LastMode are copied from the original suspended run,
+		// not from result. This is correct today because ResumeApproved always
+		// receives rt.a (the root agent), so the agent-name check at the top of
+		// ResumeApproved prevents this code path from being reached after a
+		// handoff to a sub-agent. If that constraint is ever relaxed (e.g. by
+		// passing result.LastAgent instead of rt.a), LastAgentName and LastMode
+		// must be taken from result rather than from the original suspended run.
+		//
+		// RunID is preserved from the original suspended run so idempotency keys
+		// computed inside ResumeApproved remain stable across the resume chain
+		// (loop-semantics I13).
 		newSnap := runner.SuspendedRun{
 			Messages:      result.Messages,
 			LastAgentName: suspended.LastAgentName,

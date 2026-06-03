@@ -447,6 +447,17 @@ func TestToolResultContentIsNonEmptyForEmptyResult(t *testing.T) {
 	}
 }
 
+// TestToolResultContentSingleEmptyTextBlockMatchesNil pins that a single
+// empty-text block and nil content (both semantically "no content") produce the
+// same serialized representation so clients do not need to handle two forms.
+func TestToolResultContentSingleEmptyTextBlockMatchesNil(t *testing.T) {
+	nilResult := toolResultContent(nil)
+	emptyBlock := toolResultContent([]message.Block{message.NewText("")})
+	if nilResult != emptyBlock {
+		t.Fatalf("nil content = %q, empty text block = %q; want equal", nilResult, emptyBlock)
+	}
+}
+
 func TestNewMapperRejectsEmptyIDs(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
