@@ -92,7 +92,7 @@ func (rt *Runtime) streamRun(ctx context.Context, yield func(Event, error) bool,
 // forwarded because runner.ResumeApproved enforces LastMode and the streaming
 // resume seam does not yet exist (see spec "Likely core seams" #1).
 func (rt *Runtime) streamResume(ctx context.Context, yield func(Event, error) bool, mapper *Mapper, finoMsgs []message.Message, resume []ResumeEntry, opts []runner.RunOption) {
-	suspended, err := buildSuspendedRun(rt.a, finoMsgs)
+	suspended, err := buildSuspendedRun(rt.a, finoMsgs, mapper.runID)
 	if err != nil {
 		yield(runErrEvent(mapper.runID, fmt.Errorf("rebuild suspended run: %w", err)), err)
 		return
@@ -124,7 +124,7 @@ func runErrEvent(runID string, err error) RunErrorEvent {
 // history and the agent's current default mode. The mode used is always the
 // agent's default mode; if a non-default mode was active at suspend time, pass
 // runner.WithMode on the original run so the mode names align.
-func buildSuspendedRun(a *agent.Agent, msgs []message.Message) (runner.SuspendedRun, error) {
+func buildSuspendedRun(a *agent.Agent, msgs []message.Message, runID string) (runner.SuspendedRun, error) {
 	modeName := a.DefaultMode()
 	mode, ok := a.Mode(modeName)
 	if !ok {
@@ -160,6 +160,7 @@ func buildSuspendedRun(a *agent.Agent, msgs []message.Message) (runner.Suspended
 		LastAgentName: a.Name(),
 		LastMode:      modeName,
 		PendingCalls:  pending,
+		RunID:         runID,
 	}, nil
 }
 
@@ -211,7 +212,7 @@ func convertMessages(msgs []Message) ([]message.Message, error) {
 
 func convertSingleMessage(m Message) (*message.Message, error) {
 	switch m.Role {
-	case RoleUser, RoleDeveloper:
+	case RoleUser:
 		if text := contentString(m.Content); text != "" {
 			msg := message.UserText(text)
 			return &msg, nil
@@ -220,7 +221,8 @@ func convertSingleMessage(m Message) (*message.Message, error) {
 	case RoleAssistant:
 		return convertAssistant(m)
 	default:
-		// RoleSystem, RoleActivity, RoleReasoning, unknown: skip.
+		// RoleSystem, RoleDeveloper, RoleActivity, RoleReasoning, unknown: skip.
+		// Developer messages are system-level configuration, not user turns.
 		return nil, nil
 	}
 }

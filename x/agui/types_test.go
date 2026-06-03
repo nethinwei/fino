@@ -121,4 +121,84 @@ func TestToolCallEventsUseProtocolFieldNames(t *testing.T) {
 	}
 }
 
+func TestRunStartedEventJSONShape(t *testing.T) {
+	parent := "run-parent"
+	ev := RunStartedEvent{
+		BaseEvent:   BaseEvent{Type: EventRunStarted},
+		ThreadID:    "thread-1",
+		RunID:       "run-1",
+		ParentRunID: &parent,
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		`"type":"RUN_STARTED"`,
+		`"threadId":"thread-1"`,
+		`"runId":"run-1"`,
+		`"parentRunId":"run-parent"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("json = %s, want %s", got, want)
+		}
+	}
+}
+
+func TestRunFinishedEventJSONShape(t *testing.T) {
+	ev := RunFinishedEvent{
+		BaseEvent: BaseEvent{Type: EventRunFinished},
+		ThreadID:  "thread-1",
+		RunID:     "run-1",
+		Outcome: &RunFinishedOutcome{
+			Type: RunFinishedOutcomeInterrupt,
+			Interrupts: []Interrupt{{
+				ID:         "call_1",
+				ToolCallID: "call_1",
+				Reason:     "tool_call",
+			}},
+		},
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		`"type":"RUN_FINISHED"`,
+		`"threadId":"thread-1"`,
+		`"runId":"run-1"`,
+		`"outcome":`,
+		`"type":"interrupt"`,
+		`"toolCallId":"call_1"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("json = %s, want %s", got, want)
+		}
+	}
+}
+
+func TestRunErrorEventJSONShape(t *testing.T) {
+	ev := RunErrorEvent{
+		BaseEvent: BaseEvent{Type: EventRunError},
+		Message:   "something went wrong",
+		RunID:     "run-1",
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		`"type":"RUN_ERROR"`,
+		`"message":"something went wrong"`,
+		`"runId":"run-1"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("json = %s, want %s", got, want)
+		}
+	}
+}
+
 func int64Ptr(v int64) *int64 { return &v }

@@ -339,6 +339,91 @@ func TestRuntimeConvertMessagesSkipsSystem(t *testing.T) {
 	}
 }
 
+func TestRuntimeConvertMessagesSkipsDeveloper(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleDeveloper, Content: "you are a financial assistant"},
+		{Role: RoleUser, Content: "hello"},
+	}
+	converted, err := convertMessages(msgs)
+	if err != nil {
+		t.Fatalf("convertMessages error: %v", err)
+	}
+	if len(converted) != 1 {
+		t.Fatalf("len = %d, want 1 (developer skipped)", len(converted))
+	}
+	if converted[0].Role != message.RoleUser {
+		t.Fatalf("msg[0].Role = %q, want user", converted[0].Role)
+	}
+}
+
+func TestBuildSuspendedRunPreservesRunID(t *testing.T) {
+	echo := &echoTool{}
+	a := makeAgent(t, echo)
+	msgs := []message.Message{
+		message.UserText("do it"),
+		message.Assistant(message.NewToolUse("call_1", "echo", []byte(`{}`))),
+	}
+	suspended, err := buildSuspendedRun(a, msgs, "run-42")
+	if err != nil {
+		t.Fatalf("buildSuspendedRun error: %v", err)
+	}
+	if suspended.RunID != "run-42" {
+		t.Fatalf("RunID = %q, want run-42", suspended.RunID)
+	}
+}
+
+func TestRuntimeResumeApprovalEmitsRunFinished(t *testing.T) {
+	echo := &echoTool{}
+	a := makeAgent(t, echo)
+
+	// History represents a suspended run: user turn + assistant tool-use with no
+	// following tool result (dangling batch), exactly as a suspended Result leaves it.
+	suspendedHistory := []Message{
+		{Role: RoleUser, Content: "do it"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{
+			ID:       "call_1",
+			Type:     ToolCallTypeFunction,
+			Function: FunctionCall{Name: "echo", Arguments: `{}`},
+		}}},
+	}
+
+	input := RunAgentInput{
+		ThreadID: "thread-1",
+		RunID:    "run-1",
+		Messages: suspendedHistory,
+		Resume: []ResumeEntry{{
+			InterruptID: "call_1",
+			Status:      ResumeStatusResolved,
+		}},
+	}
+
+	// ResumeApproved calls model.Generate (not Stream) for post-resume turns.
+	m := &streamModel{events: []model.Event{
+		model.TurnMessage{Message: message.Assistant(message.NewText("done"))},
+	}}
+	rt := makeRuntime(t, m, a)
+
+	events := collectEvents(t, rt, input)
+
+	if len(events) < 2 {
+		t.Fatalf("events = %d, want >= 2 (RUN_STARTED + RUN_FINISHED)", len(events))
+	}
+	if _, ok := events[0].(RunStartedEvent); !ok {
+		t.Fatalf("events[0] = %T, want RunStartedEvent", events[0])
+	}
+	last := events[len(events)-1]
+	finished, ok := last.(RunFinishedEvent)
+	if !ok {
+		t.Fatalf("last event = %T, want RunFinishedEvent", last)
+	}
+	if finished.ThreadID != "thread-1" || finished.RunID != "run-1" {
+		t.Fatalf("finished IDs: threadID=%q runID=%q", finished.ThreadID, finished.RunID)
+	}
+	if finished.Outcome != nil {
+		t.Fatalf("outcome = %+v, want nil (success, not interrupt)", finished.Outcome)
+	}
+}
+
 func TestNewRuntimeRejectsNilRunner(t *testing.T) {
 	if _, err := NewRuntime(nil, makeAgent(t)); !errors.Is(err, ErrMissingRunner) {
 		t.Fatalf("err = %v, want ErrMissingRunner", err)
