@@ -9,6 +9,7 @@ import (
 
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/message"
+	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/tool"
 )
 
@@ -99,6 +100,25 @@ func (r *Result) SuspendedRun() (SuspendedRun, error) {
 		PendingCalls:  r.PendingCalls,
 		RunID:         r.runID,
 	}, nil
+}
+
+// SuspendedRunFrom rebuilds a SuspendedRun from a model.Suspended stream event,
+// so a Stream consumer can resume with ResumeApproved exactly as a Run-path
+// caller would from Result.SuspendedRun. The two carry the same data; this is
+// the Stream-side adapter, kept here because model must not import runner
+// (loop-semantics §5).
+func SuspendedRunFrom(e model.Suspended) SuspendedRun {
+	calls := make([]PendingToolCall, len(e.PendingCalls))
+	for i, c := range e.PendingCalls {
+		calls[i] = PendingToolCall{Tool: c.Tool, Call: c.Call, Reason: c.Reason}
+	}
+	return SuspendedRun{
+		Messages:      e.Messages,
+		LastAgentName: e.LastAgentName,
+		LastMode:      e.LastMode,
+		PendingCalls:  calls,
+		RunID:         e.RunID,
+	}
 }
 
 // ResumeApproved continues a suspended run after a human has approved or

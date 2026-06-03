@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Stream-native suspension** — on the `Runner.Stream` path a Policy
+  `DecisionSuspend` now emits a terminal `model.Suspended` event carrying a
+  neutral snapshot (messages, agent/mode name, run ID, pending calls) instead
+  of being downgraded to a `ToolDeniedError`. Rebuild a `runner.SuspendedRun`
+  with the new `runner.SuspendedRunFrom` and resume via `ResumeApproved`, so
+  `Stream` has the same suspend/resume semantics as `Run`. `model.Suspended` is
+  a new sealed `model.Event`; a provider must not yield it (treated as
+  `ErrStreamContract`, like a provider-yielded `FinalMessage`).
+- **Tool-use ID invariants** — the Runner rejects empty or duplicate `tool_use`
+  IDs before authorizing or executing any tool (`ErrInvalidToolCallID` /
+  `ErrDuplicateToolCallID`), enforced in both the `Run`/`Stream` batch path and
+  in `ResumeApproved`'s dangling batch (loop-semantics I14).
+- **Approval-snapshot consistency** — `ResumeApproved` verifies each pending
+  call's name and byte-level input against the dangling `tool_use` it will
+  execute, rejecting a mismatched `SuspendedRun` before any tool runs.
+
+### Changed
+
+- **Behavior change:** `Runner.Stream` no longer downgrades a suspended batch to
+  `ToolDeniedError`. Consumers that relied on that deny error must handle the
+  terminal `model.Suspended` event instead.
+
 ## [0.7.0] - 2026-06-03
 
 ### Added
