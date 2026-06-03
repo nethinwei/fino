@@ -6,6 +6,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-04
+
+### Added
+
+- **`x/agui` — AG-UI protocol adapter** — `x/agui` is a new extension package
+  that bridges fino's ReAct runner to the
+  [AG-UI protocol](https://docs.ag-ui.com/concepts/events). A `Runtime` wraps a
+  `Runner` and `Agent` and exposes a single `Stream(ctx, RunAgentInput)` method
+  that emits typed AG-UI `Event` values over `iter.Seq2[Event, error]`.
+  - **Lifecycle events** — `RUN_STARTED`, `RUN_FINISHED`, `RUN_ERROR`,
+    `STEP_STARTED`, `STEP_FINISHED` map to runner turns and termination.
+  - **Text streaming** — `TEXT_MESSAGE_START/CONTENT/END` stream assistant text
+    deltas in real time.
+  - **Tool events** — `TOOL_CALL_START/ARGS/END` and `TOOL_CALL_RESULT` cover
+    the full tool-execution lifecycle including streaming argument chunks.
+  - **Messages snapshot** — `MESSAGES_SNAPSHOT` emitted on every turn so
+    clients can reconstruct conversation history without replaying the event log.
+  - **Reasoning events** — `REASONING_START/END` envelope and per-block
+    `REASONING_MESSAGE_START/CONTENT/END` events map fino's `TypeThinking` blocks
+    to the AG-UI reasoning sub-protocol; multiple thinking blocks in a single
+    turn each get a distinct `messageId`.
+  - **State and activity events** — `STATE_SNAPSHOT/DELTA` and
+    `ACTIVITY_SNAPSHOT/DELTA` (RFC 6902 JSON Patch) side-band emitters in
+    `sideband.go` let the host push arbitrary state and activity updates without
+    entering fino's model history.
+  - **Raw and custom events** — `NewRawEvent` and `NewCustomEvent` for
+    pass-through and extensibility.
+  - **Interrupt-aware `RUN_FINISHED`** — when the runner suspends mid-run,
+    `Stream` persists the snapshot to a `SuspendStore`, emits
+    `RUN_FINISHED{interrupt: {pendingCalls: [...]}}`, and accepts a subsequent
+    resume via `RunAgentInput.Resume`. Resume is fail-closed: without a
+    `SuspendStore` or a matching snapshot the run errors rather than executing
+    client-supplied history.
+  - **Serialization** — `MarshalEventLog` / `UnmarshalEventLog` round-trip the
+    full event log with discriminated-type restoration; unknown types come back
+    as `RawEvent` for forward compatibility. `Compact` reduces a log to its
+    latest `MESSAGES_SNAPSHOT` plus trailing events, returning a fresh copy.
+  - **`Lineage`** — `{threadId, runId, parentRunId}` struct for adapter-owned
+    correlation IDs that survive serialization.
+  - **`Runtime.Capabilities()`** — returns `Capabilities{HasSuspendResume,
+    Tools}` reflecting the actual runtime configuration.
+
+## [0.8.0] - 2026-06-03
+
 ### Added
 
 - **Stream-native suspension** — on the `Runner.Stream` path a Policy
@@ -252,6 +296,9 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
+[Unreleased]: https://github.com/nethinwei/fino/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/nethinwei/fino/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/nethinwei/fino/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/nethinwei/fino/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/nethinwei/fino/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nethinwei/fino/compare/v0.4.0...v0.5.0
