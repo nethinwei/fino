@@ -41,7 +41,7 @@ A capability earns a place in the core only if it is part of the ReAct loop **an
 ## Features
 
 - **ReAct loop, done right** — turn limits, tool authorization, lifecycle hooks, and clean termination.
-- **Streaming as first-class semantic events** — text deltas, live reasoning, tool calls, tool results, handoffs, a complete assistant snapshot per model turn (`TurnMessage`), and one run-terminal `FinalMessage`, all via `iter.Seq2`.
+- **Streaming as first-class semantic events** — text deltas, live reasoning, tool calls, tool results, handoffs, a complete assistant snapshot per model turn (`TurnMessage`), and one run-terminal event — `FinalMessage` on completion or `Suspended` when a policy suspends for approval — all via `iter.Seq2`.
 - **Modes** — one agent, multiple personas (distinct instructions, tools, and model options).
 - **Handoffs** — model-driven transfer between agents, modeled as an ordinary tool.
 - **Pluggable policy** — authorize, deny, or gate every tool call before it runs.
@@ -143,7 +143,12 @@ for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
 	case model.TurnMessage:
 		// complete assistant snapshot for each model turn
 	case model.FinalMessage:
-		// run-terminal result (emitted once, by the Runner)
+		// run-terminal result on completion (emitted once, by the Runner)
+	case model.Suspended:
+		// a policy suspended the batch for human approval; rebuild a
+		// SuspendedRun and resume after collecting approvals:
+		//   sr := runner.SuspendedRunFrom(e)
+		//   r.ResumeApproved(ctx, a, sr, approvals)
 	}
 }
 ```

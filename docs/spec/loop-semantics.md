@@ -78,7 +78,7 @@ State = (agent, mode, history, turn)
                                               被 Allow 但未执行的调用不计入）,
                                Messages: history（末尾为含全部 tool_use 的 dangling assistant 消息）,
                                LastAgent: agent, LastMode: mode.Name })
-             说明: 非错误路径，不触发 OnError。仅 Run 支持；Stream 将 Suspend 降级为 Deny（见 §5）。
+             说明: 非错误路径，不触发 OnError。Run 产出挂起 Result；Stream 发出终态 model.Suspended 事件（见 §5）。二者语义对称。
 
 [T-MAXTURNS] 前置: turn = maxTurns（循环自然退出）
              动作: OnError(ctx, wrap(ErrMaxTurns, maxTurns))
@@ -170,20 +170,24 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
 
 `Stream` 与 `Run` 共享 §3–§4 的状态转移，附加事件语义：
 
-事件分层（关键）：`TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 `model.Model.Stream` 产生；`FinalMessage` 是 **Runner 层**整个 run 的终态结果，只由 `Runner.Stream` 在最后一个无工具调用的 turn 之后发出一次。两者语义不重叠。
+事件分层（关键）：`TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 `model.Model.Stream` 产生；`FinalMessage`（完成路径）与 `model.Suspended`（挂起路径）都是 **Runner 层**的 run 终态事件，由 `Runner.Stream` 发出一次且二者互斥。它们与 `TurnMessage` 语义不重叠。
 
 ```text
-- model.Stream 契约: 每个 turn 必须 yield 恰好一个 TurnMessage 作为终结事件，且不得 yield FinalMessage；
-  TurnMessage 之后不得再有任何事件。违反者（缺失 TurnMessage、第二个 TurnMessage、TurnMessage 后继续发事件、
-  任何 FinalMessage）由 Runner 报 ErrStreamContract（运行期终止错误）。
+- model.Stream 契约: 每个 turn 必须 yield 恰好一个 TurnMessage 作为终结事件，且不得 yield Runner-only 的
+  FinalMessage 或 Suspended；TurnMessage 之后不得再有任何事件。违反者（缺失 TurnMessage、第二个 TurnMessage、
+  TurnMessage 后继续发事件、任何 FinalMessage/Suspended）由 Runner 报 ErrStreamContract（运行期终止错误）。
 - 转发 model.Stream 的语义事件（ContentBlockStart/Delta/Stop、TextDelta）；每个 turn 的 TurnMessage 也按 turn 转发，
   使含工具调用的中间 turn 的完整 assistant 快照可观测、可重放。
 - 仅在收到当前 turn 的 TurnMessage 后解析 toolUses 并执行工具。
 - 整批先授权: 串行与并行 Stream 都先按 §4 对整批 resolve+authorize，再执行任一工具。批内任一被 Deny/Suspend 则全批无副作用、不发任何 ToolCall 事件（与 Run 一致，符合 §4.1/I6）。
-- Suspend 降级: Stream 没有 suspended Result 出口（返回 iter.Seq2[Event, error]），且 FinalMessage 只用于无工具调用的终态 turn。
-  故 Stream 将 DecisionSuspend 降级为 ToolDeniedError（运行期终止错误），不引入新事件类型。完整 suspend 语义仅在 Run。
+- Suspend 事件: Stream 在批次挂起时发出终态 model.Suspended 事件（携带 neutral 快照: Messages、LastAgentName、
+  LastMode、RunID、PendingCalls），随后正常结束迭代——非错误，不发 StreamError、不触发 OnError。挂起批次不执行任何
+  工具、不发 ToolCall 事件（与 Deny 一致，符合整批先授权 §4.1/I6）。消费者用 runner.SuspendedRunFrom 重建
+  SuspendedRun 再 ResumeApproved，与 Run 路径的挂起 Result 语义对称。model.Suspended 是 model 包内的 sealed
+  Event 成员（neutral 形式，因 model 不得依赖 runner）。
 - 每个工具调用前发 ToolCall，调用后发 ToolResult；handoff 在批次结束后发 Handoff。
-- 整个 run 的最后一个 turn（无工具调用）之后，Runner 额外发出恰好一个 FinalMessage 作为 run 终态。
+- run 终态二选一: 完成路径在最后一个无工具调用的 turn 之后发出恰好一个 FinalMessage；挂起路径发出恰好一个
+  model.Suspended（见上 Suspend 事件）。二者互斥，每次 Stream 至多一个 run 终态事件。
 - 所有事件只在迭代器所在的单一 goroutine 上产生。
   ToolCall 按调用序发出；ToolResult 按完成序发出；Handoff 在批次结束后发出。
 - 终止错误: yield(StreamError{Err: err}, err) 后停止迭代，且仅此一次。
@@ -207,8 +211,8 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
                                     ⟶ Run / ResumeApproved: 直接返回 error，不触发 OnError，不执行任何工具。
                                     ⟶ Stream: 经 iterator 第二返回值并配 StreamError 报告，触发 OnError。
 
-非错误终止（Run）: DecisionSuspend 经 [T-SUSPEND] 产出 Result{Suspended:true}，不是错误，
-                  不触发 OnError，不配 StreamError。Stream 不支持该路径（降级为 ToolDeniedError）。
+非错误终止: DecisionSuspend 经 [T-SUSPEND] 是非错误终止，不触发 OnError、不配 StreamError。
+            Run 产出 Result{Suspended:true}；Stream 发出终态 model.Suspended 事件后正常结束迭代。二者语义对称。
 ```
 
 `ResumeApproved` 在校验通过后进入 executeBatch；该阶段的工具执行错误属运行期终止错误，触发 OnError 恰好一次（与 `[T-TOOLS]` 一致）。
@@ -223,7 +227,7 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
 |------|------|----------|
 | I1 | 结果有序 | 追加的 `ToolResults` 中第 i 个 `tool_result` 的 `ToolUseID` == 第 i 个 `tool_use` 的 `ID` |
 | I2 | 批次单消息 | 每次 `[T-TOOLS]` 恰好向 history 追加一条 `RoleTool` 消息 |
-| I3 | 终止唯一 | `Run`（及 `ResumeApproved`）的输出 ∈ `{一个完成 Result(Suspended=false), 一个挂起 Result(Suspended=true), 一个 error}`，三者互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
+| I3 | 终止唯一 | `Run`（及 `ResumeApproved`）的输出 ∈ `{一个完成 Result(Suspended=false), 一个挂起 Result(Suspended=true), 一个 error}`，三者互斥；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`，终态为恰好一个 `FinalMessage`（完成）或恰好一个 `model.Suspended`（挂起），二者互斥，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`/`Suspended`） |
 | I4 | OnError 一次 | 对每个运行期终止错误，`OnError` 调用次数 == 1；挂起（非错误）不触发 OnError |
 | I5 | 授权先于执行 | 对任一被执行的 cᵢ，其 `authorize(cᵢ)` 在 `execute(cᵢ)` 之前返回 `ResolvedKind = Allow` |
 | I11 | 挂起精确性 | `[T-SUSPEND]` 后 `PendingCalls` 恰好等于该批 `ResolvedKind = Suspend` 的调用（按调用序）；被 Allow 但未执行的调用不计入，且该批不追加任何 `RoleTool` 消息 |
@@ -269,7 +273,7 @@ I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 
 - **审批裁决**：`Approval{CallID, Approved, Reason}` 按 `CallID` 绑定到挂起调用。批准→执行工具；拒绝→写入 `IsError=true` 的 `rejected: <Reason>` 结果，使模型可见并据此调整（拒绝是模型可见的结果，不是隐藏控制流）。`ResumeApproved` 还校验每个 `PendingCall.Call` 的 `Name`/`Input`（字节级）与该批同 ID 的 dangling `tool_use` 一致——审批对象必须等于将执行的调用（执行参数取自 `suspended.Messages`），否则 wrap(ErrInvalidApproval)。
 - **不重新授权**：挂起调用已被授权，`ResumeApproved` 不再调用 `Policy.Authorize`（D5）。
 - **幂等键恢复**：`SuspendedRun` 额外携带 `RunID`，`ResumeApproved` 用 `suspended.RunID` 还原 `runConfig.RunID`（恒覆盖 resume 时传入的 `WithRunID`），使被批准/原 Allow 的调用获得与原始运行相同的 `tool.ExecutionContext.IdempotencyKey`（I13）。
-- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。核心校验*快照内部一致性*（PendingCalls 的 Name/Input 不与 Messages 分叉，见上）与 *CallID 良构*（I14）；但*防篡改 digest*（抵御 PendingCalls 与 Messages 被同时一致改写——其信任根属应用层的可信审批通道）、跨进程 exactly-once、Stream 的 suspend/resume 事件仍不在核心内（属 `x/` 或应用层）。
+- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。核心校验*快照内部一致性*（PendingCalls 的 Name/Input 不与 Messages 分叉，见上）与 *CallID 良构*（I14）；Stream 的 suspend 事件 `model.Suspended`（及 `runner.SuspendedRunFrom`）已在核心内（v0.8.0，见 §5）。但*防篡改 digest*（抵御 PendingCalls 与 Messages 被同时一致改写——其信任根属应用层的可信审批通道）、跨进程 exactly-once、持久化仍不在核心内（属 `x/` 或应用层）。
 
 `x/recover` 的 `Snapshot` 仅承载安全边界恢复（I10）；审批恢复由 `runner.ResumeApproved` 一等承载，二者职责不重叠。
 
