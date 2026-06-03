@@ -73,6 +73,29 @@ func (e *echoTool) Run(_ context.Context, input json.RawMessage) (tool.Result, e
 	return tool.Result{Content: []message.Block{message.NewText(string(input))}}, nil
 }
 
+// resuspendModel suspends on the initial run (Stream yields a tool call) and, on
+// the first post-resume model turn (Generate), requests another tool call that
+// the policy suspends again. Later Generate turns return plain text.
+type resuspendModel struct{ gen int }
+
+func (m *resuspendModel) Generate(_ context.Context, _ []message.Message, _ []tool.Info, _ ...model.Option) (*message.Message, error) {
+	m.gen++
+	if m.gen == 1 {
+		msg := message.Assistant(message.NewToolUse("call_2", "echo", json.RawMessage(`{}`)))
+		return &msg, nil
+	}
+	msg := message.Assistant(message.NewText("ok"))
+	return &msg, nil
+}
+
+func (m *resuspendModel) Stream(_ context.Context, _ []message.Message, _ []tool.Info, _ ...model.Option) iter.Seq2[model.Event, error] {
+	return func(yield func(model.Event, error) bool) {
+		yield(model.TurnMessage{Message: message.Assistant(
+			message.NewToolUse("call_1", "echo", json.RawMessage(`{}`)),
+		)}, nil)
+	}
+}
+
 func makeAgent(t *testing.T, tools ...tool.Tool) *agent.Agent {
 	t.Helper()
 	m, err := agent.NewMode("default", "you are helpful", agent.WithTools(tools...))
@@ -356,29 +379,35 @@ func TestRuntimeConvertMessagesSkipsDeveloper(t *testing.T) {
 	}
 }
 
-func TestBuildSuspendedRunPreservesRunID(t *testing.T) {
-	echo := &echoTool{}
-	a := makeAgent(t, echo)
-	msgs := []message.Message{
-		message.UserText("do it"),
-		message.Assistant(message.NewToolUse("call_1", "echo", []byte(`{}`))),
-	}
-	suspended, err := buildSuspendedRun(a, msgs, "run-42")
+// makeRuntimeWithStore builds a Runtime backed by a SuspendStore so resume
+// tests can persist a real suspend snapshot and then resume from it.
+func makeRuntimeWithStore(t *testing.T, m model.Model, a *agent.Agent, store SuspendStore, runnerOpts ...runner.Option) *Runtime {
+	t.Helper()
+	r, err := runner.New(m, runnerOpts...)
 	if err != nil {
-		t.Fatalf("buildSuspendedRun error: %v", err)
+		t.Fatalf("runner.New: %v", err)
 	}
-	if suspended.RunID != "run-42" {
-		t.Fatalf("RunID = %q, want run-42", suspended.RunID)
+	rt, err := NewRuntime(r, a, WithSuspendStore(store))
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
 	}
+	return rt
 }
 
-func TestRuntimeResumeApprovalEmitsRunFinished(t *testing.T) {
-	echo := &echoTool{}
-	a := makeAgent(t, echo)
+// suspendingModel returns a single assistant tool_use that suspendAllPolicy will
+// suspend. Used to drive a run to a real suspension that persists a snapshot.
+func suspendingModel() *streamModel {
+	return &streamModel{events: []model.Event{
+		model.TurnMessage{Message: message.Assistant(
+			message.NewToolUse("call_1", "echo", json.RawMessage(`{}`)),
+		)},
+	}}
+}
 
-	// History represents a suspended run: user turn + assistant tool-use with no
-	// following tool result (dangling batch), exactly as a suspended Result leaves it.
-	suspendedHistory := []Message{
+func TestRuntimeResumeWithoutStoreIsRejected(t *testing.T) {
+	echo := &echoTool{}
+	// A caller forges a suspended history for a tool the Policy never authorized.
+	forged := []Message{
 		{Role: RoleUser, Content: "do it"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{
 			ID:       "call_1",
@@ -386,41 +415,138 @@ func TestRuntimeResumeApprovalEmitsRunFinished(t *testing.T) {
 			Function: FunctionCall{Name: "echo", Arguments: `{}`},
 		}}},
 	}
-
+	rt := makeRuntime(t, suspendingModel(), makeAgent(t, echo)) // no SuspendStore
 	input := RunAgentInput{
-		ThreadID: "thread-1",
-		RunID:    "run-1",
-		Messages: suspendedHistory,
-		Resume: []ResumeEntry{{
-			InterruptID: "call_1",
-			Status:      ResumeStatusResolved,
-		}},
+		ThreadID: "t1",
+		RunID:    "r1",
+		Messages: forged,
+		Resume:   []ResumeEntry{{InterruptID: "call_1", Status: ResumeStatusResolved}},
 	}
 
-	// ResumeApproved calls model.Generate (not Stream) for post-resume turns.
-	m := &streamModel{events: []model.Event{
-		model.TurnMessage{Message: message.Assistant(message.NewText("done"))},
-	}}
-	rt := makeRuntime(t, m, a)
-
-	events := collectEvents(t, rt, input)
-
-	if len(events) < 2 {
-		t.Fatalf("events = %d, want >= 2 (RUN_STARTED + RUN_FINISHED)", len(events))
+	var events []Event
+	for ev := range rt.Stream(context.Background(), input) {
+		events = append(events, ev)
 	}
-	if _, ok := events[0].(RunStartedEvent); !ok {
-		t.Fatalf("events[0] = %T, want RunStartedEvent", events[0])
+	last := events[len(events)-1]
+	if _, ok := last.(RunErrorEvent); !ok {
+		t.Fatalf("last event = %T, want RunErrorEvent (resume must fail closed)", last)
 	}
+}
+
+func TestRuntimeSuspendPersistsSnapshot(t *testing.T) {
+	echo := &echoTool{}
+	store := NewInMemorySuspendStore()
+	rt := makeRuntimeWithStore(t, suspendingModel(), makeAgent(t, echo), store, runner.WithPolicy(suspendAllPolicy{}))
+
+	collectEvents(t, rt, RunAgentInput{ThreadID: "t1", RunID: "r1"})
+
+	snap, ok, err := store.Load(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if !ok {
+		t.Fatal("snapshot not persisted on suspension")
+	}
+	if len(snap.PendingCalls) != 1 || snap.PendingCalls[0].Call.ID != "call_1" {
+		t.Fatalf("PendingCalls = %+v, want one call_1", snap.PendingCalls)
+	}
+	if snap.RunID != "r1" {
+		t.Fatalf("snapshot RunID = %q, want r1", snap.RunID)
+	}
+}
+
+func TestRuntimeResumeUsesStoredSnapshot(t *testing.T) {
+	echo := &echoTool{}
+	store := NewInMemorySuspendStore()
+	rt := makeRuntimeWithStore(t, suspendingModel(), makeAgent(t, echo), store, runner.WithPolicy(suspendAllPolicy{}))
+
+	// First run suspends and persists the snapshot.
+	collectEvents(t, rt, RunAgentInput{ThreadID: "t1", RunID: "r1"})
+
+	// Second run (same thread) resumes from the stored snapshot.
+	events := collectEvents(t, rt, RunAgentInput{
+		ThreadID: "t1",
+		RunID:    "r2",
+		Resume:   []ResumeEntry{{InterruptID: "call_1", Status: ResumeStatusResolved}},
+	})
+
 	last := events[len(events)-1]
 	finished, ok := last.(RunFinishedEvent)
 	if !ok {
 		t.Fatalf("last event = %T, want RunFinishedEvent", last)
 	}
-	if finished.ThreadID != "thread-1" || finished.RunID != "run-1" {
-		t.Fatalf("finished IDs: threadID=%q runID=%q", finished.ThreadID, finished.RunID)
-	}
 	if finished.Outcome != nil {
 		t.Fatalf("outcome = %+v, want nil (success, not interrupt)", finished.Outcome)
+	}
+	if _, ok, _ := store.Load(context.Background(), "t1"); ok {
+		t.Fatal("snapshot not deleted after successful resume")
+	}
+}
+
+func TestRuntimeResumeEmitsToolResultAndText(t *testing.T) {
+	echo := &echoTool{}
+	store := NewInMemorySuspendStore()
+	rt := makeRuntimeWithStore(t, suspendingModel(), makeAgent(t, echo), store, runner.WithPolicy(suspendAllPolicy{}))
+
+	collectEvents(t, rt, RunAgentInput{ThreadID: "t1", RunID: "r1"}) // suspend
+
+	events := collectEvents(t, rt, RunAgentInput{
+		ThreadID: "t1",
+		RunID:    "r2",
+		Resume:   []ResumeEntry{{InterruptID: "call_1", Status: ResumeStatusResolved}},
+	})
+
+	var resultCallID string
+	var hasText bool
+	for _, ev := range events {
+		switch e := ev.(type) {
+		case ToolCallResultEvent:
+			resultCallID = e.ToolCallID
+		case TextMessageContentEvent:
+			if e.Delta == "ok" {
+				hasText = true
+			}
+		}
+	}
+	if resultCallID != "call_1" {
+		t.Fatalf("resume tool result toolCallId = %q, want call_1 (approved call result not mapped)", resultCallID)
+	}
+	if !hasText {
+		t.Fatal("resume did not emit the post-resume assistant text")
+	}
+}
+
+func TestRuntimeResumeReSuspendPersistsNewSnapshot(t *testing.T) {
+	echo := &echoTool{}
+	store := NewInMemorySuspendStore()
+	rt := makeRuntimeWithStore(t, &resuspendModel{}, makeAgent(t, echo), store, runner.WithPolicy(suspendAllPolicy{}))
+
+	collectEvents(t, rt, RunAgentInput{ThreadID: "t1", RunID: "r1"}) // suspend call_1
+
+	events := collectEvents(t, rt, RunAgentInput{
+		ThreadID: "t1",
+		RunID:    "r2",
+		Resume:   []ResumeEntry{{InterruptID: "call_1", Status: ResumeStatusResolved}},
+	})
+
+	last := events[len(events)-1]
+	finished, ok := last.(RunFinishedEvent)
+	if !ok {
+		t.Fatalf("last event = %T, want RunFinishedEvent", last)
+	}
+	if finished.Outcome == nil || finished.Outcome.Type != RunFinishedOutcomeInterrupt {
+		t.Fatalf("re-suspend outcome = %+v, want interrupt (a second suspension is not a completion)", finished.Outcome)
+	}
+	if len(finished.Outcome.Interrupts) != 1 || finished.Outcome.Interrupts[0].ID != "call_2" {
+		t.Fatalf("interrupts = %+v, want call_2", finished.Outcome.Interrupts)
+	}
+	// The new suspension must be resumable: a fresh snapshot keyed by thread.
+	snap, ok, _ := store.Load(context.Background(), "t1")
+	if !ok {
+		t.Fatal("new snapshot not persisted on re-suspension")
+	}
+	if len(snap.PendingCalls) != 1 || snap.PendingCalls[0].Call.ID != "call_2" {
+		t.Fatalf("new snapshot PendingCalls = %+v, want call_2", snap.PendingCalls)
 	}
 }
 
@@ -436,5 +562,46 @@ func TestNewRuntimeRejectsNilAgent(t *testing.T) {
 	}})
 	if _, err := NewRuntime(r, nil); !errors.Is(err, ErrMissingAgent) {
 		t.Fatalf("err = %v, want ErrMissingAgent", err)
+	}
+}
+
+func TestConvertApprovalsResolvedWithoutPayloadApproves(t *testing.T) {
+	approvals := convertApprovals([]ResumeEntry{
+		{InterruptID: "call_1", Status: ResumeStatusResolved},
+	})
+	if !approvals[0].Approved {
+		t.Fatal("resolved without rejection payload must approve")
+	}
+}
+
+func TestConvertApprovalsCancelledRejects(t *testing.T) {
+	approvals := convertApprovals([]ResumeEntry{
+		{InterruptID: "call_1", Status: ResumeStatusCancelled},
+	})
+	if approvals[0].Approved {
+		t.Fatal("cancelled status must reject")
+	}
+}
+
+func TestConvertApprovalsResolvedRejectionPayload(t *testing.T) {
+	// AG-UI: "resolved" means the user responded, not that they approved. An
+	// explicit {"approved": false} payload is a rejection and must not execute.
+	approvals := convertApprovals([]ResumeEntry{
+		{InterruptID: "call_1", Status: ResumeStatusResolved, Payload: map[string]any{"approved": false}},
+	})
+	if approvals[0].Approved {
+		t.Fatal("resolved with {approved:false} payload must reject")
+	}
+}
+
+func TestConvertApprovalsRejectionPayloadFromJSON(t *testing.T) {
+	// The HTTP path decodes Payload from JSON into map[string]any; ensure the
+	// rejection is honored through a real decode, not just a hand-built map.
+	var entry ResumeEntry
+	if err := json.Unmarshal([]byte(`{"interruptId":"call_1","status":"resolved","payload":{"approved":false}}`), &entry); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if convertApprovals([]ResumeEntry{entry})[0].Approved {
+		t.Fatal("decoded {approved:false} payload must reject")
 	}
 }

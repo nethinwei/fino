@@ -301,6 +301,9 @@ func TestMapperMapsSuspensionAsInterruptOutcome(t *testing.T) {
 	if interrupt.ID != "call_1" || interrupt.ToolCallID != "call_1" || interrupt.Message != "approval required" {
 		t.Fatalf("interrupt = %+v", interrupt)
 	}
+	if interrupt.ResponseSchema == nil {
+		t.Fatal("interrupt.ResponseSchema is nil; client cannot know the {approved} resume payload shape")
+	}
 }
 
 func TestMapperRejectsSuspensionWithoutPendingCalls(t *testing.T) {
@@ -334,6 +337,73 @@ func TestMapperRejectsSuspensionWithDuplicateCallID(t *testing.T) {
 
 	if _, err := m.Map(model.Suspended{PendingCalls: []model.SuspendedCall{pending, pending}}); err == nil {
 		t.Fatal("Map error = nil, want error")
+	}
+}
+
+func TestMapperSuspensionEmitsMessagesSnapshotBeforeFinish(t *testing.T) {
+	m, err := NewMapper("thread_1", "run_1")
+	if err != nil {
+		t.Fatalf("NewMapper error: %v", err)
+	}
+	events := mustMap(t, m, model.Suspended{
+		Messages: []message.Message{
+			message.UserText("do it"),
+			message.Assistant(message.NewToolUse("call_1", "write_file", json.RawMessage(`{}`))),
+		},
+		PendingCalls: []model.SuspendedCall{{
+			Call: message.ToolUse{ID: "call_1", Name: "write_file"},
+		}},
+	})
+	snapIdx, finIdx := -1, -1
+	for i, ev := range events {
+		switch ev.(type) {
+		case MessagesSnapshotEvent:
+			snapIdx = i
+		case RunFinishedEvent:
+			finIdx = i
+		}
+	}
+	if snapIdx < 0 {
+		t.Fatal("no MESSAGES_SNAPSHOT emitted before suspension")
+	}
+	if finIdx < 0 || snapIdx > finIdx {
+		t.Fatalf("snapshot must precede finish: snap=%d fin=%d", snapIdx, finIdx)
+	}
+	snap := events[snapIdx].(MessagesSnapshotEvent)
+	if len(snap.Messages) != 2 {
+		t.Fatalf("snapshot messages = %d, want 2", len(snap.Messages))
+	}
+	if len(snap.Messages[1].ToolCalls) != 1 || snap.Messages[1].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("snapshot assistant tool calls = %+v", snap.Messages[1].ToolCalls)
+	}
+}
+
+func TestMessagesSnapshotDefaultsEmptyToolArgsToObject(t *testing.T) {
+	m, err := NewMapper("thread_1", "run_1")
+	if err != nil {
+		t.Fatalf("NewMapper error: %v", err)
+	}
+	// A no-argument tool call has nil input. The snapshot must carry valid JSON
+	// arguments ("{}"), matching the streaming TOOL_CALL_ARGS path, not "".
+	events := mustMap(t, m, model.Suspended{
+		Messages: []message.Message{
+			message.Assistant(message.NewToolUse("call_1", "noargs", nil)),
+		},
+		PendingCalls: []model.SuspendedCall{{
+			Call: message.ToolUse{ID: "call_1", Name: "noargs"},
+		}},
+	})
+	var snap MessagesSnapshotEvent
+	for _, ev := range events {
+		if s, ok := ev.(MessagesSnapshotEvent); ok {
+			snap = s
+		}
+	}
+	if len(snap.Messages) != 1 || len(snap.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("snapshot = %+v", snap.Messages)
+	}
+	if got := snap.Messages[0].ToolCalls[0].Function.Arguments; got != "{}" {
+		t.Fatalf("snapshot tool arguments = %q, want \"{}\"", got)
 	}
 }
 

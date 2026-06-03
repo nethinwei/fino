@@ -8,6 +8,7 @@ import (
 
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
+	"github.com/nethinwei/fino/runner"
 )
 
 // ErrInvalidRunIdentity indicates that a mapper was created without the
@@ -280,14 +281,19 @@ func (m *Mapper) mapSuspended(e model.Suspended) ([]Event, error) {
 			return nil, fmt.Errorf("%w: duplicate pending call ID %q", ErrInvalidSuspension, pending.Call.ID)
 		}
 		seen[pending.Call.ID] = struct{}{}
-		interrupts[i] = Interrupt{
-			ID:         pending.Call.ID,
-			Reason:     "tool_call",
-			Message:    pending.Reason,
-			ToolCallID: pending.Call.ID,
-		}
+		interrupts[i] = buildInterrupt(pending.Call.ID, pending.Reason)
 	}
-	return append(m.closeText(), RunFinishedEvent{
+	// The runtime resumes from the persisted snapshot, but a client still needs
+	// the full message history to render the interrupt; emit it as a snapshot
+	// before the terminal event, per the AG-UI interrupt contract.
+	events := m.closeText()
+	if len(e.Messages) > 0 {
+		events = append(events, MessagesSnapshotEvent{
+			BaseEvent: BaseEvent{Type: EventMessagesSnapshot},
+			Messages:  toProtocolMessages(e.Messages),
+		})
+	}
+	return append(events, RunFinishedEvent{
 		BaseEvent: BaseEvent{Type: EventRunFinished},
 		ThreadID:  m.threadID,
 		RunID:     m.runID,
@@ -296,6 +302,103 @@ func (m *Mapper) mapSuspended(e model.Suspended) ([]Event, error) {
 			Interrupts: interrupts,
 		},
 	}), nil
+}
+
+// buildInterrupt builds the AG-UI interrupt for one suspended tool call. It is
+// shared by the stream suspension path and the resume re-suspension path so both
+// report interrupts with identical shape and response schema.
+func buildInterrupt(callID, reason string) Interrupt {
+	return Interrupt{
+		ID:             callID,
+		Reason:         "tool_call",
+		Message:        reason,
+		ToolCallID:     callID,
+		ResponseSchema: approvalResponseSchema(),
+	}
+}
+
+// interruptFinishedEvent builds a terminal RUN_FINISHED carrying an interrupt
+// outcome for the given pending calls, used when a resumed run suspends again.
+func interruptFinishedEvent(m *Mapper, pending []runner.PendingToolCall) Event {
+	interrupts := make([]Interrupt, len(pending))
+	for i, pc := range pending {
+		interrupts[i] = buildInterrupt(pc.Call.ID, pc.Reason)
+	}
+	return RunFinishedEvent{
+		BaseEvent: BaseEvent{Type: EventRunFinished},
+		ThreadID:  m.threadID,
+		RunID:     m.runID,
+		Outcome: &RunFinishedOutcome{
+			Type:       RunFinishedOutcomeInterrupt,
+			Interrupts: interrupts,
+		},
+	}
+}
+
+// approvalResponseSchema describes the resume payload an interrupt expects: a
+// JSON object with a boolean "approved" field. It tells the client that the
+// rejection intent is carried in the payload, not implied by the resume status.
+func approvalResponseSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"approved": map[string]any{"type": "boolean"},
+		},
+		"required": []any{"approved"},
+	}
+}
+
+// toProtocolMessages converts a fino message history into AG-UI protocol
+// messages for a MESSAGES_SNAPSHOT. User text, assistant text and tool calls,
+// and tool results are mapped; other roles are skipped.
+func toProtocolMessages(msgs []message.Message) []Message {
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Role {
+		case message.RoleUser:
+			out = append(out, Message{Role: RoleUser, Content: m.Text()})
+		case message.RoleAssistant:
+			out = append(out, assistantProtocolMessage(m))
+		case message.RoleTool:
+			out = append(out, toolResultProtocolMessages(m)...)
+		}
+	}
+	return out
+}
+
+func assistantProtocolMessage(m message.Message) Message {
+	pm := Message{Role: RoleAssistant}
+	if text := m.Text(); text != "" {
+		pm.Content = text
+	}
+	for _, tu := range m.ToolUses() {
+		args := string(tu.Input)
+		if args == "" {
+			args = "{}" // match the streaming TOOL_CALL_ARGS default; "" is not valid JSON
+		}
+		pm.ToolCalls = append(pm.ToolCalls, ToolCall{
+			ID:       tu.ID,
+			Type:     ToolCallTypeFunction,
+			Function: FunctionCall{Name: tu.Name, Arguments: args},
+		})
+	}
+	return pm
+}
+
+func toolResultProtocolMessages(m message.Message) []Message {
+	var out []Message
+	for _, block := range m.Content {
+		if block.Type != message.TypeToolResult {
+			continue
+		}
+		out = append(out, Message{
+			Role:       RoleTool,
+			ToolCallID: block.ToolUseID,
+			Name:       block.Name,
+			Content:    toolResultContent(block.Content),
+		})
+	}
+	return out
 }
 
 func (m *Mapper) closeText() []Event {
@@ -321,4 +424,61 @@ func stringPtr(v string) *string {
 		return nil
 	}
 	return &v
+}
+
+// mapResumeResult maps the messages a resumed run appended after the suspend
+// snapshot — tool results for the approved (or rejected) calls and any
+// post-resume assistant turns — into AG-UI events. ResumeApproved does not
+// stream, so these are mapped from the final history rather than live deltas.
+func mapResumeResult(m *Mapper, suspended runner.SuspendedRun, result *runner.Result) []Event {
+	if result == nil {
+		return nil
+	}
+	// ResumeApproved initializes its history from suspended.Messages and only
+	// appends, so result.Messages has suspended.Messages as a prefix; slice it
+	// off to get just the post-resume messages. The length guard is defensive.
+	appended := result.Messages
+	if len(suspended.Messages) <= len(appended) {
+		appended = appended[len(suspended.Messages):]
+	}
+	var events []Event
+	for _, msg := range appended {
+		switch msg.Role {
+		case message.RoleTool:
+			events = append(events, m.resumeToolResultEvents(msg)...)
+		case message.RoleAssistant:
+			events = append(events, m.resumeAssistantEvents(msg)...)
+		}
+	}
+	return events
+}
+
+func (m *Mapper) resumeToolResultEvents(msg message.Message) []Event {
+	var events []Event
+	for _, block := range msg.Content {
+		if block.Type != message.TypeToolResult {
+			continue
+		}
+		events = append(events, ToolCallResultEvent{
+			BaseEvent:  BaseEvent{Type: EventToolCallResult},
+			MessageID:  m.nextMessageID(),
+			ToolCallID: block.ToolUseID,
+			Content:    toolResultContent(block.Content),
+			Role:       stringPtr(string(RoleTool)),
+		})
+	}
+	return events
+}
+
+func (m *Mapper) resumeAssistantEvents(msg message.Message) []Event {
+	var events []Event
+	parentMessageID := ""
+	if text := msg.Text(); text != "" {
+		parentMessageID = m.nextMessageID()
+		events = append(events, textSnapshotEvents(parentMessageID, text)...)
+	}
+	for _, call := range msg.ToolUses() {
+		events = append(events, toolCallEvents(call, parentMessageID)...)
+	}
+	return events
 }

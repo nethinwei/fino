@@ -9,39 +9,60 @@ import (
 
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/message"
+	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
-	"github.com/nethinwei/fino/tool"
 )
 
-// Errors returned by Runtime construction and message conversion.
+// Errors returned by Runtime construction, message conversion, and resume.
 var (
-	ErrMissingRunner  = errors.New("runner is required")
-	ErrMissingAgent   = errors.New("agent is required")
-	ErrConvertMessage = errors.New("cannot convert AG-UI message")
+	ErrMissingRunner     = errors.New("runner is required")
+	ErrMissingAgent      = errors.New("agent is required")
+	ErrConvertMessage    = errors.New("cannot convert AG-UI message")
+	ErrResumeUnavailable = errors.New("resume requires a SuspendStore")
+	ErrNoSuspendedRun    = errors.New("no suspended run for thread")
 )
 
 // Runtime bridges a RunAgentInput to fino runner.Stream and maps the resulting
 // fino events into AG-UI events using a Mapper.
 type Runtime struct {
-	r *runner.Runner
-	a *agent.Agent
+	r     *runner.Runner
+	a     *agent.Agent
+	store SuspendStore
+}
+
+// RuntimeOption configures a Runtime.
+type RuntimeOption func(*Runtime)
+
+// WithSuspendStore enables suspend/resume by giving the Runtime a place to
+// persist the snapshot a run produces when a Policy suspends it, and to restore
+// that exact snapshot on resume. Without a store, resume requests fail closed:
+// the Runtime never rebuilds a suspended run from client-supplied messages, so a
+// caller cannot forge a history to execute a tool the Policy never authorized.
+func WithSuspendStore(store SuspendStore) RuntimeOption {
+	return func(rt *Runtime) { rt.store = store }
 }
 
 // NewRuntime creates a Runtime from a configured Runner and Agent.
-func NewRuntime(r *runner.Runner, a *agent.Agent) (*Runtime, error) {
+func NewRuntime(r *runner.Runner, a *agent.Agent, opts ...RuntimeOption) (*Runtime, error) {
 	if r == nil {
 		return nil, ErrMissingRunner
 	}
 	if a == nil {
 		return nil, ErrMissingAgent
 	}
-	return &Runtime{r: r, a: a}, nil
+	rt := &Runtime{r: r, a: a}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(rt)
+		}
+	}
+	return rt, nil
 }
 
 // Stream returns an iterator over AG-UI events for one run. The first event is
 // always RUN_STARTED; the last is RUN_FINISHED (success or interrupt) or
-// RUN_ERROR. When input.Resume is non-empty the run is treated as a resume
-// from a prior suspension; see buildSuspendedRun for constraints.
+// RUN_ERROR. When input.Resume is non-empty the run resumes a prior suspension
+// loaded from the SuspendStore; input.Messages is ignored on the resume path.
 func (rt *Runtime) Stream(ctx context.Context, input RunAgentInput, opts ...runner.RunOption) iter.Seq2[Event, error] {
 	return func(yield func(Event, error) bool) {
 		rt.streamRun(ctx, yield, input, opts)
@@ -57,17 +78,25 @@ func (rt *Runtime) streamRun(ctx context.Context, yield func(Event, error) bool,
 	if !yield(mapper.RunStarted(input.ParentRunID), nil) {
 		return
 	}
+	runOpts := append([]runner.RunOption{runner.WithRunID(input.RunID)}, opts...)
+	if len(input.Resume) > 0 {
+		rt.streamResume(ctx, yield, mapper, input.Resume, runOpts)
+		return
+	}
 	finoMsgs, err := convertMessages(input.Messages)
 	if err != nil {
 		yield(runErrEvent(input.RunID, fmt.Errorf("convert messages: %w", err)), err)
 		return
 	}
-	runOpts := append([]runner.RunOption{runner.WithRunID(input.RunID)}, opts...)
-	if len(input.Resume) > 0 {
-		rt.streamResume(ctx, yield, mapper, finoMsgs, input.Resume, runOpts)
-		return
-	}
 	for event, iterErr := range rt.r.Stream(ctx, rt.a, runner.Messages(finoMsgs), runOpts...) {
+		if susp, ok := event.(model.Suspended); ok && rt.store != nil {
+			// Persist the runner-produced snapshot so a later resume restores the
+			// exact authorized pending calls, never a client-forged history.
+			if err := rt.store.Save(ctx, input.ThreadID, runner.SuspendedRunFrom(susp)); err != nil {
+				yield(runErrEvent(input.RunID, fmt.Errorf("persist suspension: %w", err)), err)
+				return
+			}
+		}
 		mapped, mapErr := mapper.Map(event)
 		if mapErr != nil {
 			yield(runErrEvent(input.RunID, mapErr), mapErr)
@@ -84,27 +113,64 @@ func (rt *Runtime) streamRun(ctx context.Context, yield func(Event, error) bool,
 	}
 }
 
-// streamResume handles a run where input.Resume is non-empty. It reconstructs
-// a runner.SuspendedRun from the message history, converts ResumeEntry values
-// to runner.Approval, calls runner.ResumeApproved, and emits RUN_FINISHED.
-// ResumeApproved does not stream; only the terminal event is emitted. opts
-// that would apply to post-resume turns (e.g. WithModelOptions) are not
-// forwarded because runner.ResumeApproved enforces LastMode and the streaming
-// resume seam does not yet exist (see spec "Likely core seams" #1).
-func (rt *Runtime) streamResume(ctx context.Context, yield func(Event, error) bool, mapper *Mapper, finoMsgs []message.Message, resume []ResumeEntry, opts []runner.RunOption) {
-	suspended, err := buildSuspendedRun(rt.a, finoMsgs, mapper.runID)
-	if err != nil {
-		yield(runErrEvent(mapper.runID, fmt.Errorf("rebuild suspended run: %w", err)), err)
+// streamResume continues a run whose input.Resume is non-empty. It loads the
+// snapshot the original suspension persisted (keyed by thread), converts
+// ResumeEntry values to runner.Approval, calls runner.ResumeApproved, maps the
+// post-resume tool results and assistant turns to AG-UI events, and emits a
+// terminal RUN_FINISHED. Resume fails closed when no SuspendStore is configured
+// or no snapshot exists for the thread, so a forged history cannot execute an
+// unauthorized tool.
+func (rt *Runtime) streamResume(ctx context.Context, yield func(Event, error) bool, mapper *Mapper, resume []ResumeEntry, opts []runner.RunOption) {
+	if rt.store == nil {
+		yield(runErrEvent(mapper.runID, ErrResumeUnavailable), ErrResumeUnavailable)
 		return
 	}
-	approvals := convertApprovals(resume)
-	// Pass non-mode opts (e.g. WithModelOptions) to ResumeApproved so callers
-	// can influence post-resume model behavior. WithMode inside opts is rejected
-	// by ResumeApproved when it conflicts with suspended.LastMode.
-	if _, err = rt.r.ResumeApproved(ctx, rt.a, suspended, approvals, opts...); err != nil {
+	suspended, ok, err := rt.store.Load(ctx, mapper.threadID)
+	if err != nil {
+		err = fmt.Errorf("load suspended run: %w", err)
 		yield(runErrEvent(mapper.runID, err), err)
 		return
 	}
+	if !ok {
+		err = fmt.Errorf("%w: %q", ErrNoSuspendedRun, mapper.threadID)
+		yield(runErrEvent(mapper.runID, err), err)
+		return
+	}
+	approvals := convertApprovals(resume)
+	result, err := rt.r.ResumeApproved(ctx, rt.a, suspended, approvals, opts...)
+	if err != nil {
+		yield(runErrEvent(mapper.runID, err), err)
+		return
+	}
+	for _, ev := range mapResumeResult(mapper, suspended, result) {
+		if !yield(ev, nil) {
+			return
+		}
+	}
+	if result.Suspended {
+		// A post-resume turn requested another tool the Policy suspended. Persist
+		// the new snapshot under the same thread so the client can resume again,
+		// and report an interrupt rather than a completion. The snapshot is kept,
+		// not deleted. LastAgentName/LastMode/RunID are unchanged: ResumeApproved
+		// cannot switch mode and keeps the suspended run ID.
+		newSnap := runner.SuspendedRun{
+			Messages:      result.Messages,
+			LastAgentName: suspended.LastAgentName,
+			LastMode:      suspended.LastMode,
+			PendingCalls:  result.PendingCalls,
+			RunID:         suspended.RunID,
+		}
+		if err = rt.store.Save(ctx, mapper.threadID, newSnap); err != nil {
+			err = fmt.Errorf("persist re-suspension: %w", err)
+			yield(runErrEvent(mapper.runID, err), err)
+			return
+		}
+		yield(interruptFinishedEvent(mapper, result.PendingCalls), nil)
+		return
+	}
+	// Completed: drop the snapshot so the thread cannot replay it. A delete
+	// failure cannot undo a successful resume, so it must not surface as an error.
+	_ = rt.store.Delete(ctx, mapper.threadID)
 	yield(RunFinishedEvent{
 		BaseEvent: BaseEvent{Type: EventRunFinished},
 		ThreadID:  mapper.threadID,
@@ -120,59 +186,36 @@ func runErrEvent(runID string, err error) RunErrorEvent {
 	}
 }
 
-// buildSuspendedRun reconstructs a runner.SuspendedRun from the AG-UI message
-// history and the agent's current default mode. The mode used is always the
-// agent's default mode; if a non-default mode was active at suspend time, pass
-// runner.WithMode on the original run so the mode names align.
-func buildSuspendedRun(a *agent.Agent, msgs []message.Message, runID string) (runner.SuspendedRun, error) {
-	modeName := a.DefaultMode()
-	mode, ok := a.Mode(modeName)
-	if !ok {
-		return runner.SuspendedRun{}, fmt.Errorf("agent %q has no mode %q", a.Name(), modeName)
-	}
-	if len(msgs) == 0 {
-		return runner.SuspendedRun{}, errors.New("message history is empty")
-	}
-	last := msgs[len(msgs)-1]
-	if last.Role != message.RoleAssistant {
-		return runner.SuspendedRun{}, errors.New("last message is not an assistant message")
-	}
-	calls := last.ToolUses()
-	if len(calls) == 0 {
-		return runner.SuspendedRun{}, errors.New("last assistant message has no tool calls")
-	}
-	byName := make(map[string]tool.Tool, len(mode.Tools))
-	for _, t := range mode.Tools {
-		if t != nil {
-			byName[t.Info().Name] = t
-		}
-	}
-	pending := make([]runner.PendingToolCall, len(calls))
-	for i, call := range calls {
-		t, ok := byName[call.Name]
-		if !ok {
-			return runner.SuspendedRun{}, fmt.Errorf("tool %q not found in agent mode %q", call.Name, modeName)
-		}
-		pending[i] = runner.PendingToolCall{Tool: t.Info(), Call: call, Reason: "resumed via AG-UI"}
-	}
-	return runner.SuspendedRun{
-		Messages:      msgs,
-		LastAgentName: a.Name(),
-		LastMode:      modeName,
-		PendingCalls:  pending,
-		RunID:         runID,
-	}, nil
-}
-
+// convertApprovals maps AG-UI resume entries to runner approvals. An entry
+// approves its call only when the user resolved the interrupt without an
+// explicit rejection: a "cancelled" status, or a resolved status whose payload
+// carries {"approved": false}, both reject. AG-UI treats "resolved" as "the user
+// responded", not "the user approved", so the rejection intent lives in the
+// payload and must not be inferred from the status alone.
 func convertApprovals(resume []ResumeEntry) []runner.Approval {
 	approvals := make([]runner.Approval, len(resume))
 	for i, e := range resume {
 		approvals[i] = runner.Approval{
 			CallID:   e.InterruptID,
-			Approved: e.Status == ResumeStatusResolved,
+			Approved: isApproved(e),
 		}
 	}
 	return approvals
+}
+
+// isApproved reports whether a resume entry authorizes its tool call. Cancelled
+// always rejects. A resolved entry rejects only when its payload explicitly says
+// so via {"approved": false}; otherwise resolving the interrupt approves it.
+func isApproved(e ResumeEntry) bool {
+	if e.Status == ResumeStatusCancelled {
+		return false
+	}
+	if payload, ok := e.Payload.(map[string]any); ok {
+		if approved, ok := payload["approved"].(bool); ok {
+			return approved
+		}
+	}
+	return true
 }
 
 // convertMessages converts AG-UI messages to fino messages. System and
