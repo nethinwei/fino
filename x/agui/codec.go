@@ -528,7 +528,7 @@ func (m *Mapper) resumeToolResultEvents(msg message.Message) []Event {
 }
 
 func (m *Mapper) resumeAssistantEvents(msg message.Message) []Event {
-	var events []Event
+	events := m.reasoningEvents(msg)
 	parentMessageID := ""
 	if text := msg.Text(); text != "" {
 		parentMessageID = m.nextMessageID()
