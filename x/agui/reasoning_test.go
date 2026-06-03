@@ -171,3 +171,76 @@ func TestReasoningEventsJSONShape(t *testing.T) {
 		}
 	}
 }
+
+// TestResumeAssistantEventsEmitsReasoning pins that resumeAssistantEvents
+// correctly surfaces thinking blocks from resumed assistant messages, matching
+// the mapTurnMessage behavior. Without this, resume paths would silently drop
+// reasoning events, breaking parity with streaming paths.
+func TestResumeAssistantEventsEmitsReasoning(t *testing.T) {
+	m, err := NewMapper("t1", "r1")
+	if err != nil {
+		t.Fatalf("NewMapper error: %v", err)
+	}
+	msg := message.Assistant(
+		message.NewThinking("resumed reasoning"),
+		message.NewText("resumed answer"),
+	)
+	events := m.resumeAssistantEvents(msg)
+
+	hasReasoning := false
+	for _, e := range events {
+		switch e.(type) {
+		case ReasoningStartEvent, ReasoningMessageStartEvent,
+			ReasoningMessageContentEvent, ReasoningMessageEndEvent, ReasoningEndEvent:
+			hasReasoning = true
+		}
+	}
+	if !hasReasoning {
+		t.Fatalf("resumeAssistantEvents should emit reasoning events for thinking blocks, got %v", eventTypes(events))
+	}
+
+	// Verify reasoning events come before text events
+	firstReasoningIdx := -1
+	firstTextIdx := -1
+	for i, e := range events {
+		switch e.(type) {
+		case ReasoningStartEvent:
+			if firstReasoningIdx == -1 {
+				firstReasoningIdx = i
+			}
+		case TextMessageStartEvent:
+			if firstTextIdx == -1 {
+				firstTextIdx = i
+			}
+		}
+	}
+	if firstReasoningIdx == -1 {
+		t.Fatalf("no REASONING_START event found")
+	}
+	if firstTextIdx == -1 {
+		t.Fatalf("no TEXT_MESSAGE_START event found")
+	}
+	if firstReasoningIdx >= firstTextIdx {
+		t.Fatalf("reasoning events must precede text events: reasoning at %d, text at %d", firstReasoningIdx, firstTextIdx)
+	}
+}
+
+// TestResumeAssistantEventsOmitsReasoningWithoutThinking pins that
+// resumeAssistantEvents does not invent reasoning events when the resumed
+// assistant message has no thinking blocks, matching mapTurnMessage behavior.
+func TestResumeAssistantEventsOmitsReasoningWithoutThinking(t *testing.T) {
+	m, err := NewMapper("t1", "r1")
+	if err != nil {
+		t.Fatalf("NewMapper error: %v", err)
+	}
+	msg := message.Assistant(message.NewText("just an answer"))
+	events := m.resumeAssistantEvents(msg)
+
+	for _, e := range events {
+		switch e.(type) {
+		case ReasoningStartEvent, ReasoningMessageStartEvent,
+			ReasoningMessageContentEvent, ReasoningMessageEndEvent, ReasoningEndEvent:
+			t.Fatalf("unexpected reasoning event %T with no thinking block", e)
+		}
+	}
+}
