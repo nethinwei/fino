@@ -75,7 +75,7 @@ Map fino events without executing a Runner:
 
 | fino event | AG-UI output |
 | --- | --- |
-| `model.TextDelta` | text start/content lifecycle |
+| `model.TextDelta` | `TEXT_MESSAGE_START` once before the first delta, then `TEXT_MESSAGE_CONTENT` per delta |
 | `model.TurnMessage` | text end and tool call start/args/end as needed |
 | `model.ToolResult` | `TOOL_CALL_RESULT` |
 | `model.FinalMessage` | `RUN_FINISHED` |
@@ -107,11 +107,17 @@ Success criteria:
 5. Cancellation produces `RUN_ERROR` or the documented protocol cancellation
    outcome without executing pending tools.
 
-Core seam decision:
+Core seam decisions:
 
 - If approve-with-edits or frontend-defined tools cannot be implemented without
   executing a different call than the approved call, stop and design a generic
   edited/deferred execution seam before modifying core.
+- If state/activity side-band events cannot live entirely in the adapter layer
+  without polluting fino model history, stop and design a generic side-band
+  emission seam before modifying core.
+- If adapter-owned message IDs are insufficient for protocol correlation (e.g.,
+  a client requires stable IDs that survive resume or replay), stop and evaluate
+  whether a core identifier primitive is warranted before modifying core.
 
 ## Phase 3: SSE Transport
 
@@ -167,7 +173,7 @@ Run the design validation scenarios end-to-end:
 3. Human approval interrupt and resume.
 4. Reasoning visibility or encrypted reasoning continuity.
 5. State snapshot and delta propagation.
-6. Frontend-defined tool execution.
+6. Frontend-defined tool execution via adapter-controlled resume.
 7. Handoff/multi-agent continuity.
 8. Event serialization and replay from `threadId` / `runId` lineage.
 9. Capability discovery.

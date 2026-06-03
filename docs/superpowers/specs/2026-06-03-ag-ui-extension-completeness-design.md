@@ -66,25 +66,39 @@ These should be implemented in `x/agui` first, but may require core seam follow-
 - `TOOL_CALL_START`, `TOOL_CALL_ARGS`, `TOOL_CALL_END`
 - interrupt-aware `RUN_FINISHED { outcome: interrupt }`
 - `RunAgentInput.resume`
-- `approve-with-edits`
-- frontend-defined tools
+- `approve-with-edits` (corresponds to Likely core seam #2 if adapter approach is too lossy)
+- frontend-defined tools (likely requires Likely core seam #1: current `ResumeApproved`
+  requires a `SuspendedRun` produced by `policy.DecisionSuspend`; an adapter cannot
+  trigger this path without Policy cooperation)
 - multimodal user input mapping
 - activity messages and deltas
 - branchable event logs
 
 ### Likely core seams
 
-If `x/agui` cannot correctly implement the protocol with adapters alone, these are the minimal core seams to add:
+If `x/agui` cannot correctly implement the protocol with adapters alone, these are the minimal core seams to add. Each is listed only if integration tests prove it cannot be expressed through existing public seams.
 
-1. External/deferred tool execution, so a tool call can pause before execution and resume with an externally supplied result.
-2. Resume with edited tool arguments, so approval flows can replace proposed tool input instead of only accepting or rejecting it.
-3. Side-band event emission, so state/activity/custom events do not need to pollute model history.
+1. External/deferred tool execution: a tool call pauses before execution and resumes
+   with an externally supplied result. Distinct from the existing `DecisionSuspend` +
+   `ResumeApproved` path, which is Policy-initiated — the Policy must return
+   `DecisionSuspend` before a `SuspendedRun` exists. This seam is needed when the
+   adapter (not the Policy) must intercept a call, delegate execution to a frontend,
+   and inject the result back, all without a Policy-owned suspend.
+2. Resume with edited tool arguments: approval flows replace the proposed tool input
+   instead of only accepting or rejecting it. Corresponds to the `approve-with-edits`
+   convention in the adapter coverage section above.
+3. Side-band event emission: state/activity/custom events are emitted without
+   polluting fino model history.
 4. Stable message identifiers or an equivalent adapter-visible correlation primitive.
 5. Capability introspection for agent/mode/tool/multimodal/reasoning/state features.
 
 ## Package Layout
 
-`x/agui/` should be split by responsibility:
+Implementation starts as a single flat `x/agui` package (see the implementation
+plan for the starting file list). Subpackages are extracted only when a real
+dependency boundary or file-size limit makes it necessary.
+
+When subpackages do become justified, the natural split lines are:
 
 - `x/agui/types`: AG-UI protocol structs and enums.
 - `x/agui/codec`: fino <-> AG-UI event/message/tool mappings.

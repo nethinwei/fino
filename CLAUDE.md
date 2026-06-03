@@ -49,7 +49,7 @@ fino/
 ├── policy/    # Policy 接口（工具执行前授权）、AllowAll 默认实现
 ├── hooks/     # 生命周期钩子（BeforeModel/AfterModel/BeforeTool/AfterTool/OnError）
 ├── runner/    # ReAct 循环执行器、Run 输入/结果/条目
-└── providers/ # Provider 适配器（anthropic/openai/gemini），非核心
+└── providers/ # Provider 适配器（anthropic/openai/deepseek 等），非核心
 ```
 
 Runner 循环流程：选择 mode → 构造消息 → 调用模型 → 无工具调用则返回最终输出 → 有工具调用则经 Policy 授权 → 执行工具 → 追加结果 → 重复。
