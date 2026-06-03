@@ -50,14 +50,16 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 
 | PR | Theme | Output | Version Target |
 | --- | --- | --- | --- |
-| PR0 | Contract scope | Tighten README/design/spec/changelog claims around replay, recovery, and parallelism. | v0.2.1 |
-| PR1 | Tool effects | Add `tool.Effects`, `tool.WithEffects`, and surface effects through `policy.Request.Tool`. | v0.3.0 |
-| PR2 | Three-state policy | Add Allow / Deny / Suspend decisions and suspended `runner.Result`. | v0.3.0 |
-| PR3 | Approved resume | Add `SuspendedRun`, `PendingToolCall`, `Approval`, and `Runner.ResumeApproved`. | v0.4.0 |
+| PR0 ✅ | Contract scope | Tighten README/design/spec/changelog claims around replay, recovery, and parallelism. | v0.2.1 |
+| PR1 ✅ | Tool effects | Add `tool.Effects`, `tool.WithEffects`, and surface effects through `policy.Request.Tool`. | v0.3.0 |
+| PR2 ✅ | Three-state policy | Add Allow / Deny / Suspend decisions and suspended `runner.Result`. | v0.3.0 |
+| PR3 ✅ | Approved resume | Add `SuspendedRun`, `PendingToolCall`, `Approval`, and `Runner.ResumeApproved`. | v0.4.0 |
 | PR4 ✅ | Execution tape | Define recorded model, policy, tool, suspension, resume, and termination events. | v0.5.0 |
 | PR5 ✅ | Effect-aware concurrency | Make `WithMaxConcurrency` honor `Effects.ParallelSafe` by default. | v0.6.0 |
 | PR6 ✅ | Idempotency boundary | Define idempotency keys and retry constraints without automatic write retries. | v0.6.0 |
-| PR7 | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
+| PR7 ✅ | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
+| PR8 ✅ | Stream-native suspension | Make `Runner.Stream` surface suspension as a first-class terminal event, with snapshot consistency and tool-use ID invariants. | v0.8.0 |
+| PR9 🚧 | AG-UI extension layer | Build `x/agui` as a full AG-UI compatibility adapter to validate the core's extensibility. | v0.9.0 |
 
 ## PR0: Contract Scope
 
@@ -213,6 +215,32 @@ Build a small safe coding-agent flow, not a full Claude Code clone:
 7. An execution tape replays the completed run without calling the model or
    writing files again.
 
+## PR8: Stream-Native Suspension
+
+Recent commits hardened the suspend path so Stream no longer downgrades approval waits to deny errors. The stream now emits a terminal `model.Suspended` event, carries the neutral snapshot needed to resume, and rejects malformed tool-use batches before authorization or execution.
+
+Scope:
+
+1. Surface suspension on `Runner.Stream` as a terminal event instead of a deny error.
+2. Preserve the suspend snapshot with the run history, active agent, active mode, run ID, and pending calls.
+3. Reject empty or duplicate `tool_use` IDs before authorization or execution.
+4. Keep approval-snapshot consistency checks aligned with the dangling `tool_use` batch.
+
+This work closes the gap between `Run` and `Stream` suspend semantics and prepares the adapter surface needed by future external protocols.
+
+## PR9: AG-UI Extension Layer
+
+Build `x/agui` as an independent adapter layer that exercises fino against the full AG-UI protocol surface. The goal is to prove that the core can be extended to a user-facing protocol without moving AG-UI concepts into the core itself.
+
+Scope:
+
+1. Map AG-UI `RunAgentInput` into fino runner inputs and options.
+2. Convert fino runs and stream events into AG-UI lifecycle, text, tool, interrupt, reasoning, state, activity, and special events.
+3. Support AG-UI transport, capabilities discovery, serialization, and lineage helpers.
+4. Identify the smallest generic core seam needed for any AG-UI capability that cannot be expressed in `x/agui` alone.
+
+This roadmap item is intentionally an extensibility proof, not a claim that AG-UI belongs in the core.
+
 ## Version Plan
 
 | Version | Merge condition |
@@ -223,6 +251,8 @@ Build a small safe coding-agent flow, not a full Claude Code clone:
 | v0.5.0 | PR4 merged with replay/eval tests. |
 | v0.6.0 | PR5 and PR6 merged. |
 | v0.7.0 | PR7 reference proof merged. |
+| v0.8.0 | PR8 stream-native suspension merged. |
+| v0.9.0 | PR9 AG-UI extension layer merged. |
 | v1.0.0 | Contracts, property tests, replay fixtures, and reference case study are stable. |
 
 ## Non-Claims
