@@ -12,7 +12,7 @@ import (
 	"github.com/nethinwei/fino/tool"
 )
 
-// These tests pin Stream-native suspension (v0.8.1): when a Policy suspends a
+// These tests pin Stream-native suspension (v0.8.0): when a Policy suspends a
 // batch on the Stream path, the Runner emits a terminal model.Suspended event
 // carrying the neutral snapshot (not a ToolDeniedError), runs no tool, and ends
 // iteration without an error. runner.SuspendedRunFrom rebuilds a SuspendedRun so

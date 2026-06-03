@@ -273,7 +273,7 @@ I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 
 - **审批裁决**：`Approval{CallID, Approved, Reason}` 按 `CallID` 绑定到挂起调用。批准→执行工具；拒绝→写入 `IsError=true` 的 `rejected: <Reason>` 结果，使模型可见并据此调整（拒绝是模型可见的结果，不是隐藏控制流）。`ResumeApproved` 还校验每个 `PendingCall.Call` 的 `Name`/`Input`（字节级）与该批同 ID 的 dangling `tool_use` 一致——审批对象必须等于将执行的调用（执行参数取自 `suspended.Messages`），否则 wrap(ErrInvalidApproval)。
 - **不重新授权**：挂起调用已被授权，`ResumeApproved` 不再调用 `Policy.Authorize`（D5）。
 - **幂等键恢复**：`SuspendedRun` 额外携带 `RunID`，`ResumeApproved` 用 `suspended.RunID` 还原 `runConfig.RunID`（恒覆盖 resume 时传入的 `WithRunID`），使被批准/原 Allow 的调用获得与原始运行相同的 `tool.ExecutionContext.IdempotencyKey`（I13）。
-- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。核心校验*快照内部一致性*（PendingCalls 的 Name/Input 不与 Messages 分叉，见上）与 *CallID 良构*（I14）；Stream 的 suspend 事件 `model.Suspended`（及 `runner.SuspendedRunFrom`）已在核心内（v0.8.1，见 §5）。但*防篡改 digest*（抵御 PendingCalls 与 Messages 被同时一致改写——其信任根属应用层的可信审批通道）、跨进程 exactly-once、持久化仍不在核心内（属 `x/` 或应用层）。
+- **纪律**：这是*暴露能力*的最小一等 API，仍不引入 checkpoint/session/graph；快照只是 `history + agent/mode + 挂起调用`。核心校验*快照内部一致性*（PendingCalls 的 Name/Input 不与 Messages 分叉，见上）与 *CallID 良构*（I14）；Stream 的 suspend 事件 `model.Suspended`（及 `runner.SuspendedRunFrom`）已在核心内（v0.8.0，见 §5）。但*防篡改 digest*（抵御 PendingCalls 与 Messages 被同时一致改写——其信任根属应用层的可信审批通道）、跨进程 exactly-once、持久化仍不在核心内（属 `x/` 或应用层）。
 
 `x/recover` 的 `Snapshot` 仅承载安全边界恢复（I10）；审批恢复由 `runner.ResumeApproved` 一等承载，二者职责不重叠。
 
