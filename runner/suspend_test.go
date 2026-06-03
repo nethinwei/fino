@@ -6,7 +6,7 @@ package runner
 // calls; no tool in the batch executes; OnError does not fire; deny takes
 // precedence over suspend and fails fast; the serial refactor authorizes the
 // whole batch before any execution; Stream surfaces suspend as a terminal
-// model.Suspended event (v0.8.1).
+// model.Suspended event (v0.8.0).
 
 import (
 	"context"
@@ -269,7 +269,7 @@ func TestRunCompletedResultNotSuspended(t *testing.T) {
 }
 
 // Stream parallel path: a suspended batch surfaces a terminal model.Suspended
-// event (v0.8.1), not a deny error; no tool runs and iteration ends without a
+// event (v0.8.0), not a deny error; no tool runs and iteration ends without a
 // StreamError. (The serial path is covered by TestStreamSuspendEmitsSuspendedEvent
 // in stream_suspend_test.go.)
 func TestStreamParallelSuspendEmitsSuspended(t *testing.T) {
