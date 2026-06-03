@@ -59,7 +59,7 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 | PR6 ✅ | Idempotency boundary | Define idempotency keys and retry constraints without automatic write retries. | v0.6.0 |
 | PR7 ✅ | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
 | PR8 ✅ | Stream-native suspension | Make `Runner.Stream` surface suspension as a first-class terminal event, with snapshot consistency and tool-use ID invariants. | v0.8.0 |
-| PR9 🚧 | AG-UI extension layer | Build `x/agui` as a full AG-UI compatibility adapter to validate the core's extensibility. | v0.9.0 |
+| PR9 ✅ | AG-UI extension layer | Build `x/agui` as a full AG-UI compatibility adapter to validate the core's extensibility. | v0.9.0 |
 
 ## PR0: Contract Scope
 
