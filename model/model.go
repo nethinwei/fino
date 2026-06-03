@@ -18,11 +18,12 @@ type Model interface {
 	Generate(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...Option) (*message.Message, error)
 	// Stream produces a sequence of semantic events from the model. The
 	// iterator must yield exactly one TurnMessage as the final event to signal
-	// the end of the turn, and must not yield FinalMessage (FinalMessage is a
-	// Runner-only, run-terminal event). No further events may follow the
-	// TurnMessage. The Runner treats a missing TurnMessage, a second
-	// TurnMessage, a post-TurnMessage event, or any FinalMessage as a contract
-	// violation (runner.ErrStreamContract).
+	// the end of the turn. A provider yields only model-layer events; it must
+	// not yield the Runner-only terminal events FinalMessage or Suspended (both
+	// are emitted by Runner.Stream, never by a provider). No further events may
+	// follow the TurnMessage. The Runner treats a missing TurnMessage, a second
+	// TurnMessage, a post-TurnMessage event, or any FinalMessage/Suspended as a
+	// contract violation (runner.ErrStreamContract).
 	Stream(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...Option) iter.Seq2[Event, error]
 }
 
@@ -69,7 +70,8 @@ type Handoff struct{ Target string }
 // TurnMessage carries the complete assembled assistant message produced by one
 // model turn. It is the model layer's terminal event for a single Stream call:
 // a model.Model implementation MUST yield exactly one TurnMessage at the end of
-// its stream and MUST NOT yield FinalMessage. The Runner forwards each turn's
+// its stream and MUST NOT yield the Runner-only terminal events FinalMessage or
+// Suspended. The Runner forwards each turn's
 // TurnMessage to consumers so the full per-turn assistant snapshot (including
 // turns that contain tool calls) is observable and replayable.
 type TurnMessage struct{ Message message.Message }
@@ -78,12 +80,38 @@ type TurnMessage struct{ Message message.Message }
 // emitted only by the Runner, exactly once, after the final model turn produced
 // a message with no tool calls. Provider model.Model implementations must not
 // yield it (they yield TurnMessage instead); the Runner treats a provider-sent
-// FinalMessage as a contract violation.
+// FinalMessage — or Suspended, which is likewise Runner-only — as a contract
+// violation.
 type FinalMessage struct{ Message message.Message }
 
 // StreamError is a terminal error event in the stream. It is always yielded
 // alongside a non-nil iterator error to signal iteration stop.
 type StreamError struct{ Err error }
+
+// SuspendedCall is the neutral form of a Policy-suspended tool call. It mirrors
+// runner.PendingToolCall without importing runner (model must not depend on
+// runner), so the Stream path can surface suspended calls as an event.
+type SuspendedCall struct {
+	Tool   tool.Info
+	Call   message.ToolUse
+	Reason string
+}
+
+// Suspended is a Runner-generated terminal event on the Stream path: a Policy
+// suspended the batch, so no tool ran and no ToolCall was emitted. It carries
+// the neutral snapshot a caller needs to resume — rebuild a runner.SuspendedRun
+// with runner.SuspendedRunFrom, then call Runner.ResumeApproved. Like the Run
+// path's suspended Result it is not an error: iteration ends without a
+// StreamError. A provider must not yield it (Runner-only); the Runner treats a
+// provider-sent Suspended as ErrStreamContract. It is the Stream counterpart of
+// [T-SUSPEND] (loop-semantics §3/§5).
+type Suspended struct {
+	Messages      []message.Message
+	LastAgentName string
+	LastMode      string
+	RunID         string
+	PendingCalls  []SuspendedCall
+}
 
 func (ContentBlockStart) event() {}
 func (ContentBlockDelta) event() {}
@@ -95,6 +123,7 @@ func (Handoff) event()           {}
 func (TurnMessage) event()       {}
 func (FinalMessage) event()      {}
 func (StreamError) event()       {}
+func (Suspended) event()         {}
 
 // Option configures a model call.
 type Option func(*config)

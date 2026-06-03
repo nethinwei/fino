@@ -41,7 +41,7 @@ fino 只干一件事，并且尽量干好：把让 LLM Agent 真正能用起来�
 ## 能做什么
 
 - **把 ReAct 循环做对**：轮数上限、工具授权、生命周期钩子，以及干净的终止逻辑。
-- **流式就是语义事件**：文本增量、实时思考、工具调用、工具结果、转移，每个模型 turn 一份完整 assistant 快照（`TurnMessage`），以及整个 run 一份终态 `FinalMessage`，统统走 `iter.Seq2`。
+- **流式就是语义事件**：文本增量、实时思考、工具调用、工具结果、转移，每个模型 turn 一份完整 assistant 快照（`TurnMessage`），以及整个 run 一份终态事件——完成时 `FinalMessage`、Policy 挂起待审批时 `Suspended`，统统走 `iter.Seq2`。
 - **Mode（模式）**：一个 agent 挂多副人格，各有各的指令、工具和模型参数。
 - **Handoff（转移）**：模型驱动的 agent 间切换，本质上就是一个普通工具。
 - **Policy 随你换**：每次工具执行前都能放行、拒绝或拦下来。
@@ -143,7 +143,11 @@ for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
 	case model.TurnMessage:
 		// 每个模型 turn 的完整 assistant 快照
 	case model.FinalMessage:
-		// 整个 run 的终态结果（由 Runner 发出，仅一次）
+		// 完成时的 run 终态结果（由 Runner 发出，仅一次）
+	case model.Suspended:
+		// Policy 挂起批次待人工审批；重建 SuspendedRun 后恢复：
+		//   sr := runner.SuspendedRunFrom(e)
+		//   r.ResumeApproved(ctx, a, sr, approvals)
 	}
 }
 ```

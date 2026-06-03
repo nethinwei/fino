@@ -9,7 +9,6 @@ import (
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
-	"github.com/nethinwei/fino/policy"
 	"github.com/nethinwei/fino/tool"
 )
 
@@ -18,6 +17,25 @@ import (
 func (r *Runner) emitErr(ctx context.Context, yield func(model.Event, error) bool, err error) {
 	r.onError(ctx, err)
 	yield(model.StreamError{Err: err}, err)
+}
+
+// emitSuspended yields the terminal model.Suspended event for a suspended batch
+// on the Stream path. It builds the neutral snapshot from the run state and the
+// suspended pending calls. Suspension is not an error, so it fires neither
+// OnError nor a StreamError; the caller rebuilds a SuspendedRun with
+// SuspendedRunFrom and resumes via ResumeApproved.
+func (r *Runner) emitSuspended(st *runState, pending []PendingToolCall, yield func(model.Event, error) bool) {
+	calls := make([]model.SuspendedCall, len(pending))
+	for i, pc := range pending {
+		calls[i] = model.SuspendedCall{Tool: pc.Tool, Call: pc.Call, Reason: pc.Reason}
+	}
+	yield(model.Suspended{
+		Messages:      st.history,
+		LastAgentName: st.agent.Name(),
+		LastMode:      st.mode.Name,
+		RunID:         st.cfg.runID,
+		PendingCalls:  calls,
+	}, nil)
 }
 
 // Stream executes the ReAct loop like Run but yields semantic events as they
@@ -124,6 +142,12 @@ func (r *Runner) streamGenerate(ctx context.Context, st *runState, yield func(mo
 			// yields it has violated the stream contract. Fail loudly.
 			r.emitErr(ctx, yield, fmt.Errorf("%w: provider yielded FinalMessage", ErrStreamContract))
 			return ctx, nil, false
+		case model.Suspended:
+			// Suspended is also a Runner-only terminal event (emitted by the
+			// Stream path on Policy suspend); a provider must never yield it,
+			// or it would forge a terminal state and break I3.
+			r.emitErr(ctx, yield, fmt.Errorf("%w: provider yielded Suspended", ErrStreamContract))
+			return ctx, nil, false
 		default:
 			if !yield(event, nil) {
 				return ctx, nil, false
@@ -151,16 +175,13 @@ func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []mess
 		r.emitErr(ctx, yield, err)
 		return ctx, false
 	}
-	// Stream has no suspended Result path, so it downgrades suspend to deny:
-	// report the first suspended call as a ToolDeniedError. Because the whole
-	// batch is authorized before any tool runs, a suspend (like a deny) executes
-	// nothing and emits no ToolCall event. PR2 has no suspended stream event.
+	// A Policy suspend halts the Stream with a terminal model.Suspended event
+	// carrying the neutral snapshot (loop-semantics §5). Like the Run path it is
+	// not an error: no tool ran, no ToolCall was emitted, and iteration ends
+	// without a StreamError. The caller rebuilds a SuspendedRun via
+	// SuspendedRunFrom and resumes with ResumeApproved.
 	if len(pending) > 0 {
-		pc := pending[0]
-		r.emitErr(ctx, yield, &ToolDeniedError{
-			Tool:     pc.Tool,
-			Decision: policy.Decision{Kind: policy.DecisionSuspend, Reason: pc.Reason},
-		})
+		r.emitSuspended(st, pending, yield)
 		return ctx, false
 	}
 	if r.shouldRunBatchParallel(selected) {

@@ -5,7 +5,8 @@ package runner
 // suspend halts Run with a Suspended Result carrying only the suspended pending
 // calls; no tool in the batch executes; OnError does not fire; deny takes
 // precedence over suspend and fails fast; the serial refactor authorizes the
-// whole batch before any execution; Stream downgrades suspend to a deny error.
+// whole batch before any execution; Stream surfaces suspend as a terminal
+// model.Suspended event (v0.8.1).
 
 import (
 	"context"
@@ -267,33 +268,11 @@ func TestRunCompletedResultNotSuspended(t *testing.T) {
 	}
 }
 
-// Test 14: Stream downgrades DecisionSuspend to a deny error (no suspended
-// Result, no new event type).
-func TestStreamSuspendTreatedAsDeny(t *testing.T) {
-	fetch, _ := tool.NewFunc("fetch", "fetch", func(_ context.Context, _ echoInput) (string, error) { return "", nil })
-	m := &scriptedModel{responses: []message.Message{
-		message.Assistant(toolUse("call_1", "fetch")),
-	}}
-	pol := &kindPolicy{suspend: map[string]string{"fetch": "approve"}}
-	r, err := New(m, WithPolicy(pol))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	var streamErr error
-	for ev, err := range r.Stream(context.Background(), testAgent(t, fetch), Text("hi")) {
-		if err != nil {
-			streamErr = err
-		}
-		_ = ev
-	}
-	var tde *ToolDeniedError
-	if !errors.As(streamErr, &tde) {
-		t.Fatalf("stream error = %v, want ToolDeniedError (suspend downgraded to deny)", streamErr)
-	}
-}
-
-// Test 14 (parallel): Stream parallel path also downgrades suspend to deny.
-func TestStreamParallelSuspendTreatedAsDeny(t *testing.T) {
+// Stream parallel path: a suspended batch surfaces a terminal model.Suspended
+// event (v0.8.1), not a deny error; no tool runs and iteration ends without a
+// StreamError. (The serial path is covered by TestStreamSuspendEmitsSuspendedEvent
+// in stream_suspend_test.go.)
+func TestStreamParallelSuspendEmitsSuspended(t *testing.T) {
 	alpha, _ := tool.NewFunc("alpha", "alpha", func(_ context.Context, _ echoInput) (string, error) { return "", nil })
 	fetch, _ := tool.NewFunc("fetch", "fetch", func(_ context.Context, _ echoInput) (string, error) { return "", nil })
 	m := &scriptedModel{responses: []message.Message{
@@ -304,15 +283,26 @@ func TestStreamParallelSuspendTreatedAsDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	var susp *model.Suspended
 	var streamErr error
 	for ev, err := range r.Stream(context.Background(), testAgent(t, alpha, fetch), Text("hi")) {
 		if err != nil {
 			streamErr = err
 		}
-		_ = model.Event(ev)
+		if s, ok := ev.(model.Suspended); ok {
+			cp := s
+			susp = &cp
+		}
 	}
-	var tde *ToolDeniedError
-	if !errors.As(streamErr, &tde) {
-		t.Fatalf("stream error = %v, want ToolDeniedError", streamErr)
+	if streamErr != nil {
+		t.Fatalf("stream error = %v, want nil (suspend is not an error)", streamErr)
+	}
+	if susp == nil {
+		t.Fatal("no model.Suspended event emitted")
+	}
+	// The whole batch suspends because one call (fetch) suspends; PendingCalls
+	// holds only the suspended call.
+	if len(susp.PendingCalls) != 1 || susp.PendingCalls[0].Call.Name != "fetch" {
+		t.Fatalf("PendingCalls = %+v, want one fetch call", susp.PendingCalls)
 	}
 }

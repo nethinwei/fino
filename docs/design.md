@@ -339,17 +339,17 @@ for event, err := range events {
 
 流式循环规则：
 
-事件分层：`model.TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 provider 的 `model.Stream` 产生；`model.FinalMessage` 是 **Runner 层**整个 run 的终态结果，只由 `Runner.Stream` 发出一次。二者语义不重叠。
+事件分层：`model.TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 provider 的 `model.Stream` 产生；`model.FinalMessage`（完成）与 `model.Suspended`（Policy 挂起待审批）都是 **Runner 层**的 run 终态事件，二者互斥、各由 `Runner.Stream` 发出一次。它们与 `TurnMessage` 语义不重叠。
 
 1. Runner 调用 `model.Stream` 并转发模型语义事件。
-2. Provider 适配器积累流，并在每个 turn 末尾发出恰好一个 `model.TurnMessage`（不得发 `FinalMessage`，其后不得再有事件）；Runner 逐 turn 转发该快照。
+2. Provider 适配器积累流，并在每个 turn 末尾发出恰好一个 `model.TurnMessage`（不得发 Runner-only 的 `FinalMessage`/`Suspended`，其后不得再有事件）；Runner 逐 turn 转发该快照。
 3. Runner 只在收到当前 turn 的 `TurnMessage` 后解析工具调用。
 4. 若没有工具调用，Runner 在该 turn 后额外发出恰好一个 `model.FinalMessage` 作为整个 run 的终态输出，然后结束迭代。
 5. 若存在工具调用，Runner 对每个工具调用触发 Policy、Hooks 和工具执行。
 6. Runner 发出 tool call 与 tool result 事件；handoff 在批次结束后发出。
 7. Runner 将本轮所有工具结果作为一条 tool message 追加，再进入下一轮 `model.Stream`。
 
-若 provider 违反契约（缺失 `TurnMessage`、发出第二个 `TurnMessage`、`TurnMessage` 后继续发事件、或发出 `FinalMessage`），Runner 报 `runner.ErrStreamContract`（运行期终止错误），不静默兼容。
+若 provider 违反契约（缺失 `TurnMessage`、发出第二个 `TurnMessage`、`TurnMessage` 后继续发事件、或发出 Runner-only 的 `FinalMessage`/`Suspended`），Runner 报 `runner.ErrStreamContract`（运行期终止错误），不静默兼容。
 
 这样 UI 可以实时渲染文本，含工具调用的中间 turn 的完整 assistant 快照也可被观测与重放，同时工具执行仍保持确定的 turn 边界。
 
@@ -425,7 +425,7 @@ const (
     DecisionUnspecified DecisionKind = iota // 零值：回退到旧 Allow 布尔
     DecisionAllow                           // 允许执行
     DecisionDeny                            // 拒绝，Runner 返回 ToolDeniedError
-    DecisionSuspend                         // 挂起待人工审批（仅 Run；Stream 降级为 deny）
+    DecisionSuspend                         // 挂起待人工审批（Run 产出挂起 Result；Stream 发出 model.Suspended 事件）
 )
 
 type Decision struct {
@@ -441,7 +441,7 @@ Policy 返回值语义（`Decision.ResolvedKind()` 解析有效决策）：
 
 - `DecisionAllow`：允许工具执行。
 - `DecisionDeny`：策略正常拒绝，Runner 返回 `ToolDeniedError`，可通过 `errors.As` 判断。
-- `DecisionSuspend`：halt 当前批次等待人工审批。`Run` 返回 `Result{Suspended:true, PendingCalls:…}`（非错误终止，不触发 OnError）；`Stream` 无挂起出口，降级为 `ToolDeniedError`。完整审批恢复见 §"人工确认和恢复"。
+- `DecisionSuspend`：halt 当前批次等待人工审批（非错误终止，不触发 OnError）。`Run` 返回 `Result{Suspended:true, PendingCalls:…}`；`Stream` 发出终态 `model.Suspended` 事件。完整审批恢复见 §"人工确认和恢复"。
 - `error != nil` 表示策略自身失败，例如远程策略服务超时。Runner 将其作为运行时错误返回，不等同于拒绝。
 - 迁移：`Kind==DecisionUnspecified`（零值）时回退到旧 `Allow` 布尔（true→Allow，false→Deny），既有二态 Policy 不变。
 
@@ -525,7 +525,7 @@ handoff 不设置单独深度限制。循环由 `MaxTurns` 兜底，因为 hando
 
 Streaming 采用 Anthropic 的经验：原始 provider 事件应翻译为语义事件，并能在每个 turn 末尾生成完整的 assistant 消息快照。
 
-事件分层（见 `docs/spec/loop-semantics.md` §5）：`TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 provider 的 `model.Stream` 产生；`FinalMessage` 是 **Runner 层**整个 run 的终态结果，只由 `Runner.Stream` 发出一次。provider 不得发 `FinalMessage`。
+事件分层（见 `docs/spec/loop-semantics.md` §5）：`TurnMessage` 是**模型层**每个 turn 的完整 assistant 快照，由 provider 的 `model.Stream` 产生；`FinalMessage`（完成）与 `Suspended`（Policy 挂起）是 **Runner 层**的 run 终态事件，二选一、由 `Runner.Stream` 发出一次。provider 不得发 `FinalMessage` 或 `Suspended`。
 
 流事件类型：
 
@@ -538,13 +538,14 @@ Streaming 采用 Anthropic 的经验：原始 provider 事件应翻译为语义�
 - handoff（Runner 在批末发出）
 - turn message（模型层：每个 turn 末尾恰好一个完整 assistant 快照）
 - final message（Runner 层：整个 run 终态，仅一个）
+- suspended（Runner 层：Policy 挂起批次时的终态事件，携带可恢复的 neutral 快照）
 - error
 
-Provider 适配器负责把原生流翻译成 delta/content-block 事件，并在每个 turn 末尾发出恰好一个 `TurnMessage`（不发 `FinalMessage`，其后不再发事件）。Runner 转发这些事件，在无工具调用的最后一个 turn 之后追加唯一的 `FinalMessage`。
+Provider 适配器负责把原生流翻译成 delta/content-block 事件，并在每个 turn 末尾发出恰好一个 `TurnMessage`（不发 Runner-only 的 `FinalMessage`/`Suspended`，其后不再发事件）。Runner 转发这些事件，在无工具调用的最后一个 turn 之后追加唯一的 `FinalMessage`（或在批次挂起时追加唯一的 `Suspended`）。
 
 `content block start/delta/stop` 是保留消息快照能力的必要事件。即使第一版 provider 适配器只产生 `text delta` 和 `TurnMessage`，核心事件模型也必须保留这些事件类型。
 
-Stream 没有挂起出口：它返回 `iter.Seq2[Event, error]`，`FinalMessage` 只用于无工具调用的终态 turn。因此 Policy 的 `DecisionSuspend` 在 Stream 路径降级为 `ToolDeniedError`（运行期终止错误），不引入新事件类型；完整的 suspend 与审批恢复语义仅在 `Run` / `ResumeApproved` 路径。见 `docs/spec/loop-semantics.md` §5。
+Stream 在 Policy 挂起批次时发出终态 `model.Suspended` 事件（携带可恢复的 neutral 快照：Messages、agent/mode 名、RunID、PendingCalls），随后正常结束迭代——非错误，不发 `StreamError`、不触发 OnError，挂起批次不执行任何工具、不发 `ToolCall` 事件。消费者用 `runner.SuspendedRunFrom` 重建 `SuspendedRun` 再 `ResumeApproved`，与 `Run` 路径的挂起 `Result` 语义对称。见 `docs/spec/loop-semantics.md` §5。
 
 ### 错误类型
 
@@ -768,7 +769,7 @@ parallel (maxConcurrency = k>1 且全批声明 ParallelSafe): authorize 仍按�
 |--------|------|
 | 结果有序 | `tool_result` 块顺序 == 对应 `tool_use` 调用顺序，与完成顺序无关 |
 | 批次单消息 | 每个产生工具调用的 assistant turn 恰好追加一条 `RoleTool` 消息 |
-| 终止唯一 | `Run` 恰好返回一个 Result 或一个 error；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`，终止错误恰好配一个 `StreamError`（且无 `FinalMessage`） |
+| 终止唯一 | `Run` 恰好返回一个 Result 或一个 error；`Stream` 成功时每个模型 turn 恰好一个 `TurnMessage`、整个 run 终态恰好一个 `FinalMessage`（完成）或一个 `model.Suspended`（挂起），终止错误恰好配一个 `StreamError`（且无终态事件） |
 | OnError 一次 | 每个运行期终止错误恰好触发一次 `OnError` |
 | 授权先于执行 | 任一工具的 `Run` 之前，其 `Authorize` 已返回 `Allow` |
 | 协议轨迹等价 | 在工具独立性假设下，并行路径与串行路径保持结果顺序、首错选择和终止形态一致 |
