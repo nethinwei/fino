@@ -148,6 +148,13 @@ func (r *Runner) streamGenerate(ctx context.Context, st *runState, yield func(mo
 			// or it would forge a terminal state and break I3.
 			r.emitErr(ctx, yield, fmt.Errorf("%w: provider yielded Suspended", ErrStreamContract))
 			return ctx, nil, false
+		case model.ToolCall, model.ToolResult, model.Handoff:
+			// ToolCall, ToolResult, and Handoff are Runner-generated events:
+			// only the Runner emits them, around its own tool execution and
+			// handoffs. A provider that yields one is forging tool-call
+			// telemetry, so reject it rather than relaying it verbatim.
+			r.emitErr(ctx, yield, fmt.Errorf("%w: provider yielded %T", ErrStreamContract, event))
+			return ctx, nil, false
 		default:
 			if !yield(event, nil) {
 				return ctx, nil, false

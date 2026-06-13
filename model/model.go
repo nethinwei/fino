@@ -19,11 +19,12 @@ type Model interface {
 	// Stream produces a sequence of semantic events from the model. The
 	// iterator must yield exactly one TurnMessage as the final event to signal
 	// the end of the turn. A provider yields only model-layer events; it must
-	// not yield the Runner-only terminal events FinalMessage or Suspended (both
-	// are emitted by Runner.Stream, never by a provider). No further events may
-	// follow the TurnMessage. The Runner treats a missing TurnMessage, a second
-	// TurnMessage, a post-TurnMessage event, or any FinalMessage/Suspended as a
-	// contract violation (runner.ErrStreamContract).
+	// not yield the Runner-only events FinalMessage, Suspended, ToolCall,
+	// ToolResult, or Handoff (all are emitted by Runner.Stream, never by a
+	// provider). No further events may follow the TurnMessage. The Runner treats
+	// a missing TurnMessage, a second TurnMessage, a post-TurnMessage event, or
+	// any FinalMessage/Suspended/ToolCall/ToolResult/Handoff as a contract
+	// violation (runner.ErrStreamContract).
 	Stream(ctx context.Context, messages []message.Message, tools []tool.Info, opts ...Option) iter.Seq2[Event, error]
 }
 
