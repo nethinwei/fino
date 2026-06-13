@@ -128,14 +128,14 @@ func TestGenerateSchemaTypeMapping(t *testing.T) {
 	}
 	want := map[string]string{
 		"flag":   "boolean",
-		"count":  "number",
-		"big":    "number",
+		"count":  "integer",
+		"big":    "integer",
 		"ratio":  "number",
 		"tags":   "array",
 		"arr":    "array",
 		"meta":   "object",
 		"nested": "object",
-		"ptr":    "number",
+		"ptr":    "integer",
 		"name":   "string",
 	}
 	for field, wantType := range want {
