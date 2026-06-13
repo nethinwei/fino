@@ -134,3 +134,60 @@ func TestStreamRejectsProviderYieldedSuspended(t *testing.T) {
 		t.Fatalf("err = %v, want ErrStreamContract", gotErr)
 	}
 }
+
+// providerEventModel is a contract-violating model.Model: its Stream yields a
+// Runner-generated event (ToolCall/ToolResult/Handoff) and then an otherwise
+// valid TurnMessage. Only the Runner may emit those events; a provider that
+// forges one must be rejected, not have it forwarded to the consumer.
+type providerEventModel struct{ forged model.Event }
+
+func (providerEventModel) Generate(context.Context, []message.Message, []tool.Info, ...model.Option) (*message.Message, error) {
+	return nil, errors.New("not used")
+}
+
+func (m providerEventModel) Stream(context.Context, []message.Message, []tool.Info, ...model.Option) iter.Seq2[model.Event, error] {
+	return func(yield func(model.Event, error) bool) {
+		if !yield(m.forged, nil) {
+			return
+		}
+		yield(model.TurnMessage{Message: message.Assistant(message.NewText("done"))}, nil)
+	}
+}
+
+// The Runner-only events ToolCall, ToolResult, and Handoff must never come from
+// a provider. Before the fix they fell through to the default relay branch and
+// were forwarded verbatim (with no error), letting a provider forge tool-call
+// telemetry. The Runner must reject each with ErrStreamContract and must not
+// forward the forged event.
+func TestStreamRejectsProviderYieldedRunnerOnlyEvents(t *testing.T) {
+	cases := map[string]model.Event{
+		"ToolCall":   model.ToolCall{Call: message.ToolUse{ID: "call_1", Name: "fetch"}},
+		"ToolResult": model.ToolResult{CallID: "call_1", Name: "fetch"},
+		"Handoff":    model.Handoff{Target: "other"},
+	}
+	for name, forged := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, err := New(providerEventModel{forged: forged})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			var gotErr error
+			var forwarded bool
+			for ev, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
+				if err != nil {
+					gotErr = err
+				}
+				switch ev.(type) {
+				case model.ToolCall, model.ToolResult, model.Handoff:
+					forwarded = true
+				}
+			}
+			if !errors.Is(gotErr, ErrStreamContract) {
+				t.Fatalf("err = %v, want ErrStreamContract", gotErr)
+			}
+			if forwarded {
+				t.Fatal("forged Runner-only event was forwarded to the consumer")
+			}
+		})
+	}
+}
