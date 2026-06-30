@@ -203,3 +203,30 @@ func ExtraValue[T any](c Config, key any) (T, bool) {
 	v, ok := c.Extra[key].(T)
 	return v, ok
 }
+
+// Capabilities is an optional interface a Model may implement to describe the
+// modalities and sources it supports. Callers assert with
+// `caps, ok := m.(Capabilities)`; models that do not implement it should be
+// treated as text-only. The info is static and provider-wide; it does not
+// reflect per-model-name differences, so callers must still degrade
+// defensively when a provider rejects an unsupported modality.
+type Capabilities interface {
+	Capabilities() CapabilitiesInfo
+}
+
+// CapabilitiesInfo describes what a Model can accept and produce.
+type CapabilitiesInfo struct {
+	// InputModalities lists the block types the model accepts as input
+	// (e.g. message.TypeText, message.TypeImage).
+	InputModalities []message.BlockType `json:"input_modalities,omitempty"`
+	// InputSources lists the source types the model accepts
+	// (e.g. message.SourceBase64, message.SourceURL).
+	InputSources []message.SourceType `json:"input_sources,omitempty"`
+	// OutputModalities lists the block types the model can produce as output.
+	OutputModalities []message.BlockType `json:"output_modalities,omitempty"`
+	// SupportsPromptCache reports whether the provider supports prompt
+	// caching of repeated content (including multimodal blocks).
+	SupportsPromptCache bool `json:"supports_prompt_cache,omitempty"`
+	// SupportsStreaming reports whether the provider supports streaming.
+	SupportsStreaming bool `json:"supports_streaming,omitempty"`
+}
