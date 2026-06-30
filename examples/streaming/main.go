@@ -21,6 +21,7 @@ import (
 	"github.com/nethinwei/fino/providers/openai"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 type addInput struct {
@@ -62,10 +63,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	rnd := &renderer{out: bufio.NewWriter(os.Stdout)}
 	defer rnd.out.Flush()
-	stream := r.Stream(context.Background(), a, runner.Text(prompt),
+	stream := l.Stream(context.Background(), a, runner.Text(prompt),
 		runner.WithModelOptions(model.WithMaxTokens(1024)))
 	for ev, err := range stream {
 		if err != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/runner"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // Snapshot is the complete, serializable state needed to resume a run. It holds
@@ -60,9 +61,9 @@ func Load(data []byte) (Snapshot, error) {
 // snapshot history. The snapshot's mode is used unless opts contain an explicit
 // WithMode that overrides it (opts are appended after the snapshot's mode
 // selection, so a later WithMode wins). Resume composes existing primitives only.
-func (s Snapshot) Resume(ctx context.Context, r *runner.Runner, a *agent.Agent, opts ...runner.RunOption) (*runner.Result, error) {
+func (s Snapshot) Resume(ctx context.Context, l *react.Loop, a *agent.Agent, opts ...runner.RunOption) (*runner.Result, error) {
 	runOpts := append([]runner.RunOption{runner.WithMode(s.Mode)}, opts...)
-	return r.Run(ctx, a, runner.Messages(s.History), runOpts...)
+	return l.Run(ctx, a, runner.Messages(s.History), runOpts...)
 }
 
 // ResumePending continues a run like Resume, but additionally executes any
@@ -72,10 +73,10 @@ func (s Snapshot) Resume(ctx context.Context, r *runner.Runner, a *agent.Agent, 
 // paused for human approval — instead of requiring a safe-boundary snapshot. It
 // composes existing primitives only; the seam is opt-in and degrades to Resume
 // when the history tail has no pending tool_use.
-func (s Snapshot) ResumePending(ctx context.Context, r *runner.Runner, a *agent.Agent, opts ...runner.RunOption) (*runner.Result, error) {
+func (s Snapshot) ResumePending(ctx context.Context, l *react.Loop, a *agent.Agent, opts ...runner.RunOption) (*runner.Result, error) {
 	runOpts := append([]runner.RunOption{
 		runner.WithMode(s.Mode),
 		runner.WithResumeFromPendingTools(),
 	}, opts...)
-	return r.Run(ctx, a, runner.Messages(s.History), runOpts...)
+	return l.Run(ctx, a, runner.Messages(s.History), runOpts...)
 }

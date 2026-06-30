@@ -14,6 +14,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/trace"
 )
 
@@ -108,7 +109,11 @@ func TestTraceSpansAreWellNested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), a, runner.Text("go")); err != nil {
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	if _, err := l.Run(context.Background(), a, runner.Text("go")); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -159,7 +164,11 @@ func TestTraceNoDoubleEndOnParallelToolError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), a, runner.Text("go")); err == nil {
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	if _, err := l.Run(context.Background(), a, runner.Text("go")); err == nil {
 		t.Fatalf("Run: expected tool error, got nil")
 	}
 

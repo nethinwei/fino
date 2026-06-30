@@ -13,6 +13,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/replay"
 )
 
@@ -77,7 +78,11 @@ func TestRecordThenReplayReproducesRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	rec, err := r1.Run(context.Background(), recAgent, runner.Text("find go"))
+	l1, err := react.New(r1)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	rec, err := l1.Run(context.Background(), recAgent, runner.Text("find go"))
 	if err != nil {
 		t.Fatalf("record Run: %v", err)
 	}
@@ -101,7 +106,11 @@ func TestRecordThenReplayReproducesRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New replay: %v", err)
 	}
-	rep, err := r2.Run(context.Background(), repAgent, runner.Text("find go"))
+	l2, err := react.New(r2)
+	if err != nil {
+		t.Fatalf("react.New replay: %v", err)
+	}
+	rep, err := l2.Run(context.Background(), repAgent, runner.Text("find go"))
 	if err != nil {
 		t.Fatalf("replay Run: %v", err)
 	}

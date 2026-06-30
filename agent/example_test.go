@@ -10,6 +10,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 type staticModel struct{}
@@ -27,7 +28,8 @@ func Example() {
 	mode, _ := agent.NewMode("default", "Be helpful.")
 	a, _ := agent.New("assistant", agent.WithMode(mode), agent.WithDefaultMode("default"))
 	r, _ := runner.New(staticModel{})
-	result, _ := r.Run(context.Background(), a, runner.Text("hi"))
+	l, _ := react.New(r)
+	result, _ := l.Run(context.Background(), a, runner.Text("hi"))
 	fmt.Println(result.Text())
 	// Output: hello
 }

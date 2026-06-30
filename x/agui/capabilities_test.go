@@ -9,6 +9,7 @@ import (
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 func TestCapabilitiesReflectActualRuntime(t *testing.T) {
@@ -33,9 +34,13 @@ func TestCapabilitiesReflectActualRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
 
 	// Without a SuspendStore, HasSuspendResume must be false.
-	rt, err := NewRuntime(r, a)
+	rt, err := NewRuntime(l, a)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -48,7 +53,7 @@ func TestCapabilitiesReflectActualRuntime(t *testing.T) {
 	}
 
 	// With a SuspendStore, HasSuspendResume must be true.
-	rt2, err := NewRuntime(r, a, WithSuspendStore(NewInMemorySuspendStore()))
+	rt2, err := NewRuntime(l, a, WithSuspendStore(NewInMemorySuspendStore()))
 	if err != nil {
 		t.Fatalf("NewRuntime with store: %v", err)
 	}

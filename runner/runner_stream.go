@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"iter"
 	"sync"
 
 	"github.com/nethinwei/fino/agent"
@@ -36,71 +35,6 @@ func (r *Runner) emitSuspended(st *runState, pending []PendingToolCall, yield fu
 		RunID:         st.cfg.runID,
 		PendingCalls:  calls,
 	}, nil)
-}
-
-// Stream executes the ReAct loop like Run but yields semantic events as they
-// occur. Iteration stops after a final message with no tool calls, on the turn
-// limit, or on the first error. Terminal errors are yielded as a
-// model.StreamError alongside a non-nil iterator error. The arguments mirror Run.
-func (r *Runner) Stream(ctx context.Context, a *agent.Agent, input Input, opts ...RunOption) iter.Seq2[model.Event, error] {
-	return func(yield func(model.Event, error) bool) {
-		r.streamLoop(ctx, yield, a, input, opts)
-	}
-}
-
-// streamLoop drives the ReAct loop for Stream, emitting events through yield
-// until a final message, the turn limit, or an error ends iteration.
-func (r *Runner) streamLoop(ctx context.Context, yield func(model.Event, error) bool, a *agent.Agent, input Input, opts []RunOption) {
-	st, err := r.prepareRun(a, input, opts)
-	if err != nil {
-		r.emitErr(ctx, yield, err)
-		return
-	}
-	ctx, ok := r.resumePendingToolsStream(ctx, st, yield)
-	if !ok {
-		return
-	}
-	for turn := 0; turn < r.maxTurns; turn++ {
-		if err := ctx.Err(); err != nil {
-			r.emitErr(ctx, yield, err)
-			return
-		}
-		newCtx, msg, ok := r.streamGenerate(ctx, st, yield)
-		if !ok {
-			return
-		}
-		ctx = newCtx
-		calls := msg.ToolUses()
-		if len(calls) == 0 {
-			yield(model.FinalMessage{Message: *msg}, nil)
-			return
-		}
-		ctx, ok = r.streamToolCalls(ctx, st, calls, yield)
-		if !ok {
-			return
-		}
-	}
-	r.emitErr(ctx, yield, fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns))
-}
-
-// resumePendingToolsStream is the Stream counterpart of resumePendingTools: when
-// the resume-from-pending seam is enabled and the input history's tail carries
-// pending tool calls, it executes them (emitting ToolCall/ToolResult events)
-// before the first model turn. The bool result is false when iteration should
-// stop. It is a no-op when the seam is off or there is nothing pending.
-func (r *Runner) resumePendingToolsStream(ctx context.Context, st *runState, yield func(model.Event, error) bool) (context.Context, bool) {
-	if !st.cfg.resumePending {
-		return ctx, true
-	}
-	pending := pendingToolUses(st.history)
-	if len(pending) == 0 {
-		return ctx, true
-	}
-	if err := ctx.Err(); err != nil {
-		r.emitErr(ctx, yield, err)
-		return ctx, false
-	}
-	return r.streamToolCalls(ctx, st, pending, yield)
 }
 
 // streamGenerate builds the model input, consumes the model's event stream
@@ -175,21 +109,23 @@ func (r *Runner) streamGenerate(ctx context.Context, st *runState, yield func(mo
 // in parallel depending on the batch's ParallelSafe declarations. It emits
 // ToolCall/ToolResult/Handoff events, then appends a single RoleTool message
 // with all results. The bool result is false when iteration should stop.
-func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
+func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, []PendingToolCall, bool) {
 	_, toolsByName := collectTools(st.mode.Tools)
 	selected, pending, err := r.authorizeBatch(ctx, st, toolsByName, calls)
 	if err != nil {
 		r.emitErr(ctx, yield, err)
-		return ctx, false
+		return ctx, nil, false
 	}
 	// A Policy suspend halts the Stream with a terminal model.Suspended event
 	// carrying the neutral snapshot (loop-semantics §5). Like the Run path it is
 	// not an error: no tool ran, no ToolCall was emitted, and iteration ends
-	// without a StreamError. The caller rebuilds a SuspendedRun via
-	// SuspendedRunFrom and resumes with ResumeApproved.
+	// without a StreamError. The pending slice is returned non-empty so the
+	// single-step caller (StreamStep) can report StepSuspended rather than
+	// StepStopped. The caller rebuilds a SuspendedRun via SuspendedRunFrom and
+	// resumes with NewResumeRun.
 	if len(pending) > 0 {
 		r.emitSuspended(st, pending, yield)
-		return ctx, false
+		return ctx, pending, false
 	}
 	if r.shouldRunBatchParallel(selected) {
 		return r.finishStreamToolCallsParallel(ctx, st, selected, calls, yield)
@@ -197,32 +133,32 @@ func (r *Runner) streamToolCalls(ctx context.Context, st *runState, calls []mess
 	return r.streamToolCallsSerialAuthorized(ctx, st, selected, calls, yield)
 }
 
-func (r *Runner) streamToolCallsSerialAuthorized(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
+func (r *Runner) streamToolCallsSerialAuthorized(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, []PendingToolCall, bool) {
 	blocks := make([]message.Block, 0, len(calls))
 	for i, call := range calls {
 		if err := ctx.Err(); err != nil {
 			r.emitErr(ctx, yield, err)
-			return ctx, false
+			return ctx, nil, false
 		}
 		if !yield(model.ToolCall{Call: call}, nil) {
-			return ctx, false
+			return ctx, nil, false
 		}
 		newCtx, out, err := r.execute(ctx, st, selected[i], call)
 		if err != nil {
 			r.emitErr(ctx, yield, err)
-			return ctx, false
+			return ctx, nil, false
 		}
 		ctx = newCtx
 		if !yield(model.ToolResult{CallID: call.ID, Name: call.Name, Result: out}, nil) {
-			return ctx, false
+			return ctx, nil, false
 		}
 		blocks = append(blocks, message.NewToolResult(call.ID, call.Name, out.Content, out.IsError))
 	}
 	if ctx, ok := r.emitHandoffs(ctx, st, selected, yield); !ok {
-		return ctx, false
+		return ctx, nil, false
 	}
 	st.history = append(st.history, message.ToolResults(blocks...))
-	return ctx, true
+	return ctx, nil, true
 }
 
 // emitHandoffs applies every handoff tool in the batch in call order (last
@@ -262,23 +198,24 @@ type streamResult struct {
 // goroutine, so the iterator stays safe. After execution it reports the first
 // error by call order, otherwise applies handoffs and appends the batched
 // RoleTool message.
-func (r *Runner) finishStreamToolCallsParallel(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, bool) {
+func (r *Runner) finishStreamToolCallsParallel(ctx context.Context, st *runState, selected []tool.Tool, calls []message.ToolUse, yield func(model.Event, error) bool) (context.Context, []PendingToolCall, bool) {
 	for _, call := range calls {
 		if !yield(model.ToolCall{Call: call}, nil) {
-			return ctx, false
+			return ctx, nil, false
 		}
 	}
 	ch, cancel := r.dispatchTools(ctx, st, selected, calls)
 	defer cancel(nil)
 	outcomes, stopped := r.drainToolResults(ch, cancel, calls, yield)
 	if stopped {
-		return ctx, false
+		return ctx, nil, false
 	}
 	if err := r.firstBatchError(ctx, outcomes); err != nil {
 		r.emitErr(ctx, yield, err)
-		return ctx, false
+		return ctx, nil, false
 	}
-	return r.finalizeStreamBatch(ctx, st, selected, calls, outcomes, yield)
+	c, ok := r.finalizeStreamBatch(ctx, st, selected, calls, outcomes, yield)
+	return c, nil, ok
 }
 
 // dispatchTools launches one goroutine per call, bounded by a maxConcurrency

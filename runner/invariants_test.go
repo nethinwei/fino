@@ -67,7 +67,7 @@ func runScript(t *testing.T, s propScript, conc int) runOutcome {
 	log := &eventLog{}
 	a := buildPropAgent(t, log)
 	ch := &countingHooks{}
-	opts := []Option{WithMaxTurns(s.maxTurns), WithHooks(ch.hooks())}
+	opts := []Option{WithHooks(ch.hooks())}
 	if s.denyTool != "" {
 		opts = append(opts, WithPolicy(recPolicy{deny: map[string]bool{s.denyTool: true}, log: log}))
 	} else {
@@ -80,7 +80,7 @@ func runScript(t *testing.T, s propScript, conc int) runOutcome {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	res, runErr := r.Run(context.Background(), a, Text("hi"))
+	res, runErr := r.RunMax(s.maxTurns, context.Background(), a, Text("hi"))
 	return runOutcome{res: res, err: runErr, events: log.snapshot(), onError: ch.onError.Load()}
 }
 
@@ -241,7 +241,7 @@ func streamScript(t *testing.T, s propScript, conc int) streamOutcome {
 	log := &eventLog{}
 	a := buildPropAgent(t, log)
 	ch := &countingHooks{}
-	opts := []Option{WithMaxTurns(s.maxTurns), WithHooks(ch.hooks())}
+	opts := []Option{WithHooks(ch.hooks())}
 	if s.denyTool != "" {
 		opts = append(opts, WithPolicy(recPolicy{deny: map[string]bool{s.denyTool: true}, log: log}))
 	}
@@ -254,7 +254,7 @@ func streamScript(t *testing.T, s propScript, conc int) streamOutcome {
 	}
 	out := streamOutcome{}
 	openCalls := map[string]bool{}
-	for ev, err := range r.Stream(context.Background(), a, Text("hi")) {
+	for ev, err := range r.StreamMax(s.maxTurns, context.Background(), a, Text("hi")) {
 		if err != nil {
 			out.termErr = err
 		}

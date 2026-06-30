@@ -199,11 +199,11 @@ func TestRunDefaultMaxTurns(t *testing.T) {
 
 func TestRunWithMaxTurns(t *testing.T) {
 	m := &scriptedModel{responses: []message.Message{message.Assistant(message.NewText("ok"))}}
-	r, err := New(m, WithMaxTurns(20))
+	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), testAgent(t), Text("hi"))
+	_, err = r.RunMax(20, context.Background(), testAgent(t), Text("hi"))
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -519,12 +519,12 @@ func TestStreamMaxTurns(t *testing.T) {
 			model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"x"}`)))},
 		},
 	}
-	r, err := New(m, WithMaxTurns(2))
+	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
 	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, echo), Text("hi")) {
+	for _, err := range r.StreamMax(2, context.Background(), testAgent(t, echo), Text("hi")) {
 		if err != nil {
 			gotErr = err
 			break

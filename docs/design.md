@@ -2,6 +2,13 @@
 
 ## 状态
 
+> **v0.9.1 边界变更**：多轮 ReAct 循环已从核心 `runner` 移至 `x/react`。核心只提供
+> 单步原语（`Runner.NewRun` / `Run.Step` / `Run.StreamStep` / `Runner.NewResumeRun`）与
+> 执行一致性机制。本文档示例代码中的 `runner.Run` / `runner.Stream` /
+> `runner.ResumeApproved` / `runner.WithMaxTurns` 现对应 `react.Loop.Run` /
+> `react.Loop.Stream` / `react.Loop.ResumeApproved` / `react.WithMaxTurns`；数据类型
+> （`Result`、`Input`、`SuspendedRun`、`Approval` 等）仍属 `runner`。语义不变。
+
 本文档记录 `fino` 的初始设计。它参考了以下项目：
 
 - `eino`：宽边界的图编排、组件和 Agent 框架
@@ -41,12 +48,12 @@ SDK 应把这个循环暴露为小而可组合的 Go 原语。CLI、服务端、
 | 工具 | `tool.Tool` 接口和函数工具 helper | 包装文件系统、bash、MCP、RAG、浏览器、数据库或任意业务 API |
 | 权限 | `policy.Policy` 接口 | 实现确认、RBAC、审计、沙箱、allowlist、风险评分 |
 | 模式 | `agent.Mode` | 实现 plan/code/review/debug 等不同提示词和工具集 |
-| 执行 | `runner.Run` | 外层接工作流库、HTTP handler、CLI loop、队列 worker 或 cron |
+| 执行 | `runner` 单步原语 + `x/react.Loop` | 外层接工作流库、HTTP handler、CLI loop、队列 worker 或 cron |
 | 历史 | 显式消息输入 | 用户接入 SQLite、Redis、文件、云存储或自己的 session 系统 |
 | 流式 | 语义事件 | 用户接终端 UI、WebSocket、SSE、日志系统或 tracing |
 | 转移 | handoff tool helper | 用户可实现 LLM 驱动转移，也可用普通 Go 控制流实现确定性编排 |
 
-一个能力进入核心包的条件：它必须是 ReAct 反馈循环的一部分，且不能被 Tool、Policy、Hook、Mode、Model 或 Runner 外层代码干净实现。否则它应该留在用户代码、示例或 add-on 包。
+一个能力进入核心包的条件：它必须是单个 ReAct 回合的一部分，且不能被 Tool、Policy、Hook、Mode、Model 或 Runner 单步原语外层代码干净实现。否则它应该留在用户代码、`x/react`、示例或 add-on 包。多轮 turn 编排本身不进入核心——它由 `x/react` 或用户代码基于 `Run.Step` 组合。
 
 ## 从参考项目学到什么
 

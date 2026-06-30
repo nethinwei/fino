@@ -19,16 +19,6 @@ func TestNewRejectsNilModel(t *testing.T) {
 	}
 }
 
-// T3: New rejects a non-positive maximum turn count.
-func TestNewRejectsNonPositiveMaxTurns(t *testing.T) {
-	m := &scriptedModel{}
-	for _, n := range []int{0, -1} {
-		if _, err := New(m, WithMaxTurns(n)); err == nil {
-			t.Fatalf("New(WithMaxTurns(%d)) error = nil, want non-nil", n)
-		}
-	}
-}
-
 // T4: WithMode selects a non-default mode; the run uses that mode's
 // instructions as the system message.
 func TestRunWithModeSelectsMode(t *testing.T) {

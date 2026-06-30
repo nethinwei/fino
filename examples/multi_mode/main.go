@@ -17,6 +17,7 @@ import (
 	"github.com/nethinwei/fino/providers/openai"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 type pathInput struct {
@@ -51,17 +52,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := context.Background()
 	log.Print("=== run 1: plan mode ===")
-	plan, err := r.Run(ctx, a, runner.Text("Outline the steps to add a feature."), runner.WithMode("plan"))
+	plan, err := l.Run(ctx, a, runner.Text("Outline the steps to add a feature."), runner.WithMode("plan"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("[plan]", plan.Text())
 
 	log.Print("=== run 2: code mode ===")
-	code, err := r.Run(ctx, a, runner.Text("Now implement step one."), runner.WithMode("code"))
+	code, err := l.Run(ctx, a, runner.Text("Now implement step one."), runner.WithMode("code"))
 	if err != nil {
 		log.Fatal(err)
 	}

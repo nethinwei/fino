@@ -22,6 +22,7 @@ import (
 	"github.com/nethinwei/fino/policy"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // scriptedModel returns one assistant message per turn. It is the whole "LLM"
@@ -92,11 +93,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx := context.Background()
 
 	// First leg: the run suspends before executing the gated tool. The history
 	// already holds the dangling assistant tool_use — nothing to hand-capture.
-	res, err := r.Run(ctx, a, runner.Text("Delete /tmp/report.txt"))
+	res, err := l.Run(ctx, a, runner.Text("Delete /tmp/report.txt"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -126,7 +131,7 @@ func main() {
 	// Second leg: resume with the human's decisions. Approved calls run their
 	// real tool; rejected calls become model-visible error results. No
 	// checkpoint type, no graph — just the snapshot plus the approvals.
-	res, err = r.ResumeApproved(ctx, a, suspended, approvals)
+	res, err = l.ResumeApproved(ctx, a, suspended, approvals)
 	if err != nil {
 		log.Fatal(err)
 	}

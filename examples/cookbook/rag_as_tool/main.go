@@ -22,6 +22,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // docs is a stand-in knowledge base. A real retriever would embed and rank.
@@ -95,8 +96,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	res, err := r.Run(context.Background(), a, runner.Text("How long do refunds take?"))
+	res, err := l.Run(context.Background(), a, runner.Text("How long do refunds take?"))
 	if err != nil {
 		log.Fatal(err)
 	}

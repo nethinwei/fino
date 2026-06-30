@@ -33,6 +33,7 @@ import (
 	"github.com/nethinwei/fino/providers/deepseek"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // trimmingModel wraps any model.Model and trims the message history to an
@@ -117,12 +118,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// A long prior conversation that would otherwise grow unbounded.
 	history := seedHistory()
 	log.Printf("[input]  resuming a conversation with %d prior message(s)", len(history))
 
-	result, err := r.Run(context.Background(), a, runner.Messages(history))
+	result, err := l.Run(context.Background(), a, runner.Messages(history))
 	if err != nil {
 		log.Fatal(err)
 	}

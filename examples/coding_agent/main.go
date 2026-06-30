@@ -18,6 +18,7 @@ import (
 	"github.com/nethinwei/fino/providers/openai"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/replay"
 )
 
@@ -65,6 +66,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -75,7 +80,7 @@ func main() {
 	planHistory := []message.Message{message.UserText(prompt)}
 	turn := 0
 	var pendingToolResults []message.Block
-	for event, err := range r.Stream(ctx, recAgent, runner.Text(prompt), runner.WithMode("plan")) {
+	for event, err := range l.Stream(ctx, recAgent, runner.Text(prompt), runner.WithMode("plan")) {
 		if err != nil {
 			log.Fatalf("[plan]   stream error: %v", err)
 		}
@@ -135,8 +140,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l2, err := react.New(r2)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	codeResult, err := r2.Run(ctx, recAgent,
+	codeResult, err := l2.Run(ctx, recAgent,
 		runner.Messages(planHistory),
 		runner.WithMode("code"),
 		runner.WithRunID(runID),
@@ -177,7 +186,7 @@ func main() {
 		}
 		replay.RecordApproval(log_, approvals)
 
-		codeResult, err = r2.ResumeApproved(ctx, recAgent, suspended, approvals)
+		codeResult, err = l2.ResumeApproved(ctx, recAgent, suspended, approvals)
 		replay.RecordResume(log_, suspended, approvals, codeResult, err)
 		if err != nil {
 			log.Fatal(err)

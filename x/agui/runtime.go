@@ -11,6 +11,7 @@ import (
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // Errors returned by Runtime construction, message conversion, and resume.
@@ -22,10 +23,10 @@ var (
 	ErrNoSuspendedRun    = errors.New("no suspended run for thread")
 )
 
-// Runtime bridges a RunAgentInput to fino runner.Stream and maps the resulting
-// fino events into AG-UI events using a Mapper.
+// Runtime bridges a RunAgentInput to a react.Loop and maps the resulting fino
+// events into AG-UI events using a Mapper.
 type Runtime struct {
-	r     *runner.Runner
+	l     *react.Loop
 	a     *agent.Agent
 	store SuspendStore
 }
@@ -42,15 +43,15 @@ func WithSuspendStore(store SuspendStore) RuntimeOption {
 	return func(rt *Runtime) { rt.store = store }
 }
 
-// NewRuntime creates a Runtime from a configured Runner and Agent.
-func NewRuntime(r *runner.Runner, a *agent.Agent, opts ...RuntimeOption) (*Runtime, error) {
-	if r == nil {
+// NewRuntime creates a Runtime from a configured react.Loop and Agent.
+func NewRuntime(l *react.Loop, a *agent.Agent, opts ...RuntimeOption) (*Runtime, error) {
+	if l == nil {
 		return nil, ErrMissingRunner
 	}
 	if a == nil {
 		return nil, ErrMissingAgent
 	}
-	rt := &Runtime{r: r, a: a}
+	rt := &Runtime{l: l, a: a}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(rt)
@@ -88,7 +89,7 @@ func (rt *Runtime) streamRun(ctx context.Context, yield func(Event, error) bool,
 		yield(runErrEvent(input.RunID, fmt.Errorf("convert messages: %w", err)), err)
 		return
 	}
-	for event, iterErr := range rt.r.Stream(ctx, rt.a, runner.Messages(finoMsgs), runOpts...) {
+	for event, iterErr := range rt.l.Stream(ctx, rt.a, runner.Messages(finoMsgs), runOpts...) {
 		if susp, ok := event.(model.Suspended); ok && rt.store != nil {
 			// Persist the runner-produced snapshot so a later resume restores the
 			// exact authorized pending calls, never a client-forged history.
@@ -115,11 +116,11 @@ func (rt *Runtime) streamRun(ctx context.Context, yield func(Event, error) bool,
 
 // streamResume continues a run whose input.Resume is non-empty. It loads the
 // snapshot the original suspension persisted (keyed by thread), converts
-// ResumeEntry values to runner.Approval, calls runner.ResumeApproved, maps the
-// post-resume tool results and assistant turns to AG-UI events, and emits a
-// terminal RUN_FINISHED. Resume fails closed when no SuspendStore is configured
-// or no snapshot exists for the thread, so a forged history cannot execute an
-// unauthorized tool.
+// ResumeEntry values to runner.Approval, calls rt.l.ResumeApproved (the
+// x/react loop), maps the post-resume tool results and assistant turns to
+// AG-UI events, and emits a terminal RUN_FINISHED. Resume fails closed when
+// no SuspendStore is configured or no snapshot exists for the thread, so a
+// forged history cannot execute an unauthorized tool.
 //
 // Known adapter gaps (Phase 6 completeness audit):
 //
@@ -150,7 +151,7 @@ func (rt *Runtime) streamResume(ctx context.Context, yield func(Event, error) bo
 		return
 	}
 	approvals := convertApprovals(resume)
-	result, err := rt.r.ResumeApproved(ctx, rt.a, suspended, approvals, opts...)
+	result, err := rt.l.ResumeApproved(ctx, rt.a, suspended, approvals, opts...)
 	if err != nil {
 		yield(runErrEvent(mapper.runID, err), err)
 		return

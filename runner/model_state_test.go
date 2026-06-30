@@ -325,11 +325,11 @@ func TestHarnessSmoke(t *testing.T) {
 	s := genScript(rng, kindSuccess)
 	log := &eventLog{}
 	a := buildPropAgent(t, log)
-	r, err := New(&propModel{turns: s.turns}, WithMaxTurns(s.maxTurns))
+	r, err := New(&propModel{turns: s.turns})
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Text("hi"))
+	res, err := r.RunMax(s.maxTurns, context.Background(), a, Text("hi"))
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}

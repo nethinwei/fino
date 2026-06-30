@@ -7,6 +7,7 @@ import (
 
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/runner"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/replay"
 )
 
@@ -71,10 +72,14 @@ func TestReplayPlanCodeSuspendResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
 
 	ctx := context.Background()
 
-	planResult, err := r.Run(ctx, recAgent, runner.Text("plan prompt"), runner.WithMode("plan"))
+	planResult, err := l.Run(ctx, recAgent, runner.Text("plan prompt"), runner.WithMode("plan"))
 	if err != nil {
 		t.Fatalf("plan Run: %v", err)
 	}
@@ -83,7 +88,7 @@ func TestReplayPlanCodeSuspendResume(t *testing.T) {
 	}
 
 	runID := "coding-run-1"
-	codeResult, err := r.Run(ctx, recAgent,
+	codeResult, err := l.Run(ctx, recAgent,
 		runner.Messages(planResult.Messages),
 		runner.WithMode("code"),
 		runner.WithRunID(runID),
@@ -108,7 +113,7 @@ func TestReplayPlanCodeSuspendResume(t *testing.T) {
 			}
 		}
 
-		codeResult, err = r.ResumeApproved(ctx, recAgent, suspended, approvals)
+		codeResult, err = l.ResumeApproved(ctx, recAgent, suspended, approvals)
 		if err != nil {
 			t.Fatalf("ResumeApproved: %v", err)
 		}

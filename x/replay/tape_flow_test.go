@@ -12,6 +12,7 @@ import (
 	"github.com/nethinwei/fino/policy"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/replay"
 )
 
@@ -117,7 +118,11 @@ func TestRecordingToolCapturesCallID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), recAgent, runner.Text("find go"), runner.WithRunID("run_x")); err != nil {
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	if _, err := l.Run(context.Background(), recAgent, runner.Text("find go"), runner.WithRunID("run_x")); err != nil {
 		t.Fatalf("record Run: %v", err)
 	}
 	if len(log.Tools) != 1 {
@@ -166,7 +171,11 @@ func TestRecordCompletedRunEventOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	res, err := r.Run(context.Background(), recAgent, runner.Text("find go"))
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	res, err := l.Run(context.Background(), recAgent, runner.Text("find go"))
 	if err != nil {
 		t.Fatalf("record Run: %v", err)
 	}
@@ -200,7 +209,11 @@ func TestReplayAvoidsRealModelToolPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	if _, err := r1.Run(context.Background(), recAgent, runner.Text("find go")); err != nil {
+	l1, err := react.New(r1)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	if _, err := l1.Run(context.Background(), recAgent, runner.Text("find go")); err != nil {
 		t.Fatalf("record Run: %v", err)
 	}
 	recordedModelCalls, recordedToolCalls, recordedPolicyCalls := fp.i, toolCalls.Load(), policyCalls.Load()
@@ -213,7 +226,11 @@ func TestReplayAvoidsRealModelToolPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New replay: %v", err)
 	}
-	rep, err := r2.Run(context.Background(), repAgent, runner.Text("find go"))
+	l2, err := react.New(r2)
+	if err != nil {
+		t.Fatalf("react.New replay: %v", err)
+	}
+	rep, err := l2.Run(context.Background(), repAgent, runner.Text("find go"))
 	if err != nil {
 		t.Fatalf("replay Run: %v", err)
 	}
@@ -247,7 +264,11 @@ func TestReplayPolicyDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	res, err := r1.Run(context.Background(), recAgent, runner.Text("find go"))
+	l1, err := react.New(r1)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	res, err := l1.Run(context.Background(), recAgent, runner.Text("find go"))
 	if !errors.Is(err, runner.ErrToolDenied) {
 		t.Fatalf("record run err = %v, want ErrToolDenied", err)
 	}
@@ -259,7 +280,11 @@ func TestReplayPolicyDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New replay: %v", err)
 	}
-	_, err = r2.Run(context.Background(), repAgent, runner.Text("find go"))
+	l2, err := react.New(r2)
+	if err != nil {
+		t.Fatalf("react.New replay: %v", err)
+	}
+	_, err = l2.Run(context.Background(), repAgent, runner.Text("find go"))
 	if !errors.Is(err, runner.ErrToolDenied) {
 		t.Fatalf("replay run err = %v, want ErrToolDenied", err)
 	}
@@ -281,7 +306,11 @@ func TestRecordSuspendTape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	res, err := r.Run(context.Background(), recAgent, runner.Text("find go"))
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	res, err := l.Run(context.Background(), recAgent, runner.Text("find go"))
 	if err != nil {
 		t.Fatalf("record Run: %v", err)
 	}
@@ -427,7 +456,11 @@ func TestRecordApprovalResumeTape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	res, err := r.Run(context.Background(), recAgent, runner.Text("find go"))
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	res, err := l.Run(context.Background(), recAgent, runner.Text("find go"))
 	if err != nil || !res.Suspended {
 		t.Fatalf("record Run: err=%v suspended=%v", err, res != nil && res.Suspended)
 	}
@@ -439,7 +472,7 @@ func TestRecordApprovalResumeTape(t *testing.T) {
 
 	approvals := []runner.Approval{{CallID: "c1", Approved: true}}
 	replay.RecordApproval(log, approvals)
-	res2, err := r.ResumeApproved(context.Background(), recAgent, suspended, approvals)
+	res2, err := l.ResumeApproved(context.Background(), recAgent, suspended, approvals)
 	if err != nil {
 		t.Fatalf("ResumeApproved: %v", err)
 	}

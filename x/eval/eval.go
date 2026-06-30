@@ -12,6 +12,7 @@ import (
 
 	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/runner"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/replay"
 )
 
@@ -50,7 +51,11 @@ func RunWithOptions(ctx context.Context, c Case, opts ...runner.Option) error {
 	if err != nil {
 		return fmt.Errorf("eval %q: new runner: %w", c.Name, err)
 	}
-	res, err := r.Run(ctx, a, c.Input)
+	l, err := react.New(r)
+	if err != nil {
+		return fmt.Errorf("eval %q: new loop: %w", c.Name, err)
+	}
+	res, err := l.Run(ctx, a, c.Input)
 	if err != nil {
 		return fmt.Errorf("eval %q: run: %w", c.Name, err)
 	}

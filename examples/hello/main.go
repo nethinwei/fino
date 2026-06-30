@@ -28,6 +28,7 @@ import (
 	"github.com/nethinwei/fino/providers/openai"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 type addInput struct {
@@ -68,10 +69,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	prompt := "What is 2 + 3? Use the add tool."
 	log.Printf("[input]  %s", prompt)
-	result, err := r.Run(context.Background(), a, runner.Text(prompt))
+	result, err := l.Run(context.Background(), a, runner.Text(prompt))
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/nethinwei/fino/agent"
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/tool"
@@ -21,9 +20,10 @@ var (
 	// invalid resume input: a malformed SuspendedRun, or an approval set that
 	// does not match the suspended pending calls (missing, unknown, duplicate).
 	ErrInvalidApproval = errors.New("invalid approval")
-	// ErrResumeAgentMismatch indicates ResumeApproved was called with an agent
-	// other than the one active when the run suspended (SuspendedRun.LastAgentName).
-	// Resuming under the wrong agent would resolve tools in the wrong context.
+	// ErrResumeAgentMismatch indicates NewResumeRun (or react.Loop.ResumeApproved)
+	// was called with an agent other than the one active when the run suspended
+	// (SuspendedRun.LastAgentName). Resuming under the wrong agent would resolve
+	// tools in the wrong context.
 	ErrResumeAgentMismatch = errors.New("resume agent does not match suspended agent")
 )
 
@@ -119,58 +119,6 @@ func SuspendedRunFrom(e model.Suspended) SuspendedRun {
 		PendingCalls:  calls,
 		RunID:         e.RunID,
 	}
-}
-
-// ResumeApproved continues a suspended run after a human has approved or
-// rejected its pending tool calls. It validates that a matches the agent active
-// at suspend time and that the approvals validly cover the pending calls, then
-// executes the batch in call order — approved (and previously-allowed) calls run
-// their tools; rejected calls produce a model-visible error tool_result — and
-// resumes the ReAct loop from the next model turn. It does not re-consult the
-// Policy: human approval replaces policy authorization for the suspended calls.
-func (r *Runner) ResumeApproved(ctx context.Context, a *agent.Agent, suspended SuspendedRun, approvals []Approval, opts ...RunOption) (*Result, error) {
-	if a == nil {
-		return nil, errors.New("agent is required")
-	}
-	if a.Name() != suspended.LastAgentName {
-		return nil, fmt.Errorf("%w: passed %q, want %q", ErrResumeAgentMismatch, a.Name(), suspended.LastAgentName)
-	}
-	if err := validateSuspendedRun(suspended, approvals); err != nil {
-		return nil, err
-	}
-	mode, ok := a.Mode(suspended.LastMode)
-	if !ok {
-		return nil, fmt.Errorf("mode %q not found", suspended.LastMode)
-	}
-	cfg := runConfig{modeName: suspended.LastMode}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
-	// The resumed batch's IdempotencyKey must match the original run, so the
-	// suspended RunID always wins over any WithRunID passed on resume
-	// (loop-semantics I13).
-	cfg.runID = suspended.RunID
-	// Mode cannot be overridden on resume: the suspended batch's tool_uses were
-	// resolved against suspended.LastMode, so resuming in another mode would
-	// resolve them in the wrong tool set. Other run options (e.g. model options)
-	// are honored.
-	if cfg.modeName != suspended.LastMode {
-		return nil, fmt.Errorf("%w: cannot override mode on resume (got %q, suspended in %q)",
-			ErrInvalidApproval, cfg.modeName, suspended.LastMode)
-	}
-	st := &runState{
-		agent:   a,
-		mode:    mode,
-		history: append([]message.Message(nil), suspended.Messages...),
-		cfg:     cfg,
-	}
-	ctx, err := r.resumeExecuteBatch(ctx, st, suspended.PendingCalls, approvals)
-	if err != nil {
-		return nil, err
-	}
-	return r.loop(ctx, st)
 }
 
 // validateSuspendedRun checks the snapshot is well-formed and the approvals

@@ -21,6 +21,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // scriptedModel asks for three tools at once, then finishes.
@@ -84,9 +85,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	start := time.Now()
-	res, err := r.Run(context.Background(), a, runner.Text("Fetch a, b and c"))
+	res, err := l.Run(context.Background(), a, runner.Text("Fetch a, b and c"))
 	if err != nil {
 		log.Fatal(err)
 	}
