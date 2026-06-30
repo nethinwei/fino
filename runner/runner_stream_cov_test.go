@@ -28,17 +28,22 @@ func TestStreamSerialBatchAuthorizedBeforeExecute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, t0, t1), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var gotErr error
 	var sawToolCall bool
-	for ev, err := range r.Stream(context.Background(), testAgent(t, t0, t1), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
+	rn.StreamStep(func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
 		}
 		if _, ok := ev.(model.ToolCall); ok {
 			sawToolCall = true
 		}
-	}
+		return true
+	})
 	var tde *ToolDeniedError
 	if !errors.As(gotErr, &tde) {
 		t.Fatalf("error = %v, want ToolDeniedError", gotErr)
@@ -72,13 +77,18 @@ func TestStreamParallelPolicyDenial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, echoTool(t, "t0"), echoTool(t, "t1")), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t, echoTool(t, "t0"), echoTool(t, "t1")), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	var tde *ToolDeniedError
 	if !errors.As(gotErr, &tde) {
 		t.Fatalf("error = %v, want ToolDeniedError", gotErr)
@@ -99,13 +109,18 @@ func TestStreamParallelToolError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, failing, echoTool(t, "t1")), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t, failing, echoTool(t, "t1")), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if !errors.Is(gotErr, boom) {
 		t.Fatalf("error = %v, want boom", gotErr)
 	}
@@ -132,14 +147,31 @@ func TestStreamParallelHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), source, Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var handoffs int
-	for ev, err := range r.Stream(context.Background(), source, Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectEvents := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Fatalf("Stream error: %v", stepErr)
 		}
 		if _, ok := ev.(model.Handoff); ok {
 			handoffs++
 		}
+		return true
+	}
+	// Step 1: tool batch with handoff — StepContinue
+	out, err := rn.StreamStep(collectEvents)
+	if err != nil {
+		t.Fatalf("StreamStep (tool turn): %v", err)
+	}
+	if out.Status != StepContinue {
+		t.Fatalf("step 1 status = %v, want StepContinue", out.Status)
+	}
+	// Step 2: final turn from target agent — StepCompleted
+	if _, err := rn.StreamStep(collectEvents); err != nil {
+		t.Fatalf("StreamStep (final turn): %v", err)
 	}
 	if handoffs != 1 {
 		t.Fatalf("handoffs = %d, want 1", handoffs)
@@ -160,13 +192,18 @@ func TestStreamSerialToolError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, failing), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t, failing), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if !errors.Is(gotErr, boom) {
 		t.Fatalf("error = %v, want boom", gotErr)
 	}
@@ -183,14 +220,18 @@ func TestStreamParallelConsumerStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, echoTool(t, "t0"), echoTool(t, "t1")), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	count := 0
-	for _, err := range r.Stream(context.Background(), testAgent(t, echoTool(t, "t0"), echoTool(t, "t1")), Text("hi")) {
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Fatalf("unexpected error: %v", stepErr)
 		}
 		count++
-		break // stop after the first event
-	}
+		return false // stop after the first event
+	})
 	if count != 1 {
 		t.Fatalf("consumed %d events, want 1", count)
 	}

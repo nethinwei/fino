@@ -13,6 +13,7 @@ import (
 	"github.com/nethinwei/fino/providers/openai"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/replay"
 )
 
@@ -60,11 +61,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	l, err := react.New(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := context.Background()
 	prompt := "Read both README.md and CHANGELOG.md at the same time and summarize them briefly."
 	log.Printf("[plan]   starting plan phase")
-	planResult, err := r.Run(ctx, recAgent, runner.Text(prompt), runner.WithMode("plan"))
+	planResult, err := l.Run(ctx, recAgent, runner.Text(prompt), runner.WithMode("plan"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -75,7 +80,7 @@ func main() {
 	codePrompt := "Based on the plan, write a file called hello.txt with a greeting. Use the write_file tool."
 	codeMessages := append(planResult.Messages, message.UserText(codePrompt))
 	log.Printf("[code]   starting code phase (runID=%s)", runID)
-	codeResult, err := r.Run(ctx, recAgent,
+	codeResult, err := l.Run(ctx, recAgent,
 		runner.Messages(codeMessages),
 		runner.WithMode("code"),
 		runner.WithRunID(runID),
@@ -104,7 +109,7 @@ func main() {
 		}
 		replay.RecordApproval(log_, approvals)
 
-		codeResult, err = r.ResumeApproved(ctx, recAgent, suspended, approvals)
+		codeResult, err = l.ResumeApproved(ctx, recAgent, suspended, approvals)
 		replay.RecordResume(log_, suspended, approvals, codeResult, err)
 		if err != nil {
 			log.Fatal(err)

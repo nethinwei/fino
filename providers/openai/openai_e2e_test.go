@@ -15,6 +15,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 var _ model.Model = (*Model)(nil)
@@ -208,8 +209,9 @@ func TestRunnerToolLoopWithDeepSeekShape(t *testing.T) {
 	a, _ := agent.New("assistant", agent.WithMode(mode), agent.WithDefaultMode("default"))
 	m, _ := New("deepseek-v4-flash", WithBaseURL(srv.URL), WithAPIKey("k"))
 	r, _ := runner.New(m)
+	l, _ := react.New(r)
 
-	result, err := r.Run(context.Background(), a, runner.Text("hi"))
+	result, err := l.Run(context.Background(), a, runner.Text("hi"))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

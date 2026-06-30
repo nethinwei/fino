@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: `runner.NewRun` rejects a dangling tool_use tail when the resume
+  seam is off.** A history whose last message is an assistant tool_use with no
+  following tool_result is not a safe boundary (loop-semantics I10): most
+  providers (notably Anthropic) return 400 on it. `prepareRun` now rejects it up
+  front with `ErrPendingToolUseInHistory` instead of forwarding the ill-formed
+  request. Enable `WithResumeFromPendingTools` to execute the pending batch
+  before the first model turn, or capture the snapshot at a completed turn
+  boundary. `NewResumeRun` is unaffected (its suspended snapshot legitimately
+  ends in a dangling tool_use).
+
+## [0.9.1] - 2026-06-30
+
+### Changed
+
+- **Breaking: the multi-turn ReAct loop left the core.** The core `runner`
+  package no longer ships a multi-turn loop. `runner.Runner.Run`, `Stream`,
+  `ResumeApproved`, and `WithMaxTurns` are removed. The loop now lives in
+  `x/react` as `Loop.Run` / `Loop.Stream` / `Loop.ResumeApproved` with
+  `react.WithMaxTurns`, reusing all `runner.*` data types. This aligns fino's
+  boundary with the Anthropic SDK, where the SDK exposes messages + `tool_use`
+  and the agent loop is user-written. The core keeps the single-step primitives
+  and the execution-consistency mechanisms (suspend/resume, three-state policy,
+  effect-aware concurrency, idempotency, stream-contract checks) that cannot be
+  reconstructed by wrapping `Tool`, `Policy`, `Hook`, `Mode`, or `Model`.
+
+### Added
+
+- **Core single-step ReAct primitives.** `runner.Runner.NewRun` creates a
+  per-run session; `Run.Step` and `Run.StreamStep` drive one ReAct turn (model
+  call + authorize/execute the tool batch); `Run.ResumePendingIfEnabled` runs
+  the resume-from-pending tail batch; `Runner.NewResumeRun` rebuilds a run from
+  a `SuspendedRun` and executes the approved batch without re-consulting the
+  policy, leaving the post-resume turns to the caller; `Runner.FireOnError`
+  fires the `OnError` hook for loop-level errors (e.g. max turns) observed by
+  the outer loop; `Run.Result` / `Run.SuspendedResult` build the terminal
+  `*Result`.
+- **`x/react` reference loop.** `react.New(*runner.Runner, opts...)` returns a
+  `*Loop` with `WithMaxTurns`; `Loop.Run` / `Stream` / `ResumeApproved` mirror
+  the shapes the core used to provide, composed from the single-step primitives.
+
+### Migration
+
+Replace `r.Run(...)` / `r.Stream(...)` / `r.ResumeApproved(...)` /
+`runner.WithMaxTurns` with a `react.Loop`: build `r, _ := runner.New(m,
+opts...)`, then `l, _ := react.New(r, react.WithMaxTurns(n))`, then call
+`l.Run` / `l.Stream` / `l.ResumeApproved`. `runner` data types (`Result`,
+`Input`, `SuspendedRun`, `Approval`, `PendingToolCall`, `RunOption`,
+`WithMode`, `WithRunID`, `WithModelOptions`, `WithResumeFromPendingTools`,
+`SuspendedRunFrom`, errors) are unchanged. To write your own loop, drive
+`rn, _ := r.NewRun(ctx, a, input, opts...)` and call `rn.Step()` (or
+`rn.StreamStep(yield)`) until `StepCompleted` / `StepSuspended`.
+
 ## [0.9.0] - 2026-06-04
 
 ### Added
@@ -296,7 +350,8 @@ small composable primitives; the core depends on the standard library only.
   `finocode` (an interactive coding agent).
 - **Docs** — bilingual README (English / 简体中文) and `docs/design.md`.
 
-[Unreleased]: https://github.com/nethinwei/fino/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/nethinwei/fino/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/nethinwei/fino/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/nethinwei/fino/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/nethinwei/fino/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/nethinwei/fino/compare/v0.6.0...v0.7.0

@@ -48,17 +48,18 @@ fino/
 ├── agent/     # Agent 定义、Mode（指令+工具集）、Handoff tool helper
 ├── policy/    # Policy 接口（工具执行前授权）、AllowAll 默认实现
 ├── hooks/     # 生命周期钩子（BeforeModel/AfterModel/BeforeTool/AfterTool/OnError）
-├── runner/    # ReAct 循环执行器、Run 输入/结果/条目
+├── runner/    # ReAct 单步原语（NewRun/Step/StreamStep/NewResumeRun）+ 执行一致性机制；不含多轮循环
+├── x/react/   # 参考多轮 ReAct 循环（Loop.Run/Stream/ResumeApproved），非核心
 └── providers/ # Provider 适配器（anthropic/openai/deepseek 等），非核心
 ```
 
-Runner 循环流程：选择 mode → 构造消息 → 调用模型 → 无工具调用则返回最终输出 → 有工具调用则经 Policy 授权 → 执行工具 → 追加结果 → 重复。
+核心不提供多轮循环，只提供单步原语：`Runner.NewRun` 创建一次运行会话，`Run.Step` / `Run.StreamStep` 驱动一个 ReAct 回合（调用模型 → 无工具调用则完成 → 有工具调用则经 Policy 授权 → 执行工具 → 追加结果）。多轮 turn 编排在 `x/react.Loop` 中重复调用 Step 完成。单步流程：选择 mode → 构造消息 → 调用模型 → 无工具调用则完成 → 有工具调用则经 Policy 授权 → 执行工具 → 追加结果（一次回合）。
 
 ## 硬性设计约束
 
-- **核心最小化**：不引入图引擎、RAG、MCP、托管工具或内置 session store
-- **扩展点最大化**：所有外部能力必须通过 `model.Model`、`tool.Tool`、`policy.Policy`、`hooks.Hooks`、`agent.Mode` 或 `runner.Run` 输入组合
-- **奥卡姆剃刀**：如果用户能用 Tool、Policy、Hook、Mode 或外层 Go 代码实现，就不加新的核心抽象
+- **核心最小化**：不引入图引擎、RAG、MCP、托管工具、内置 session store，也不提供多轮 ReAct 循环（循环在 `x/react`）
+- **扩展点最大化**：所有外部能力必须通过 `model.Model`、`tool.Tool`、`policy.Policy`、`hooks.Hooks`、`agent.Mode`、`runner.Runner` 单步原语或外层 Go 代码（含 `x/react`）组合
+- **奥卡姆剃刀**：如果用户能用 Tool、Policy、Hook、Mode、单步原语或外层 Go 代码实现，就不加新的核心抽象
 - **无隐藏状态**：Runner 只持有配置，每次运行拥有自己的消息列表
 - **核心包不绑定 provider 客户端**：provider 细节隐藏在 `model.Model` 接口之后
 

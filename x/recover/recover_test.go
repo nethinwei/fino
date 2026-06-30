@@ -12,6 +12,7 @@ import (
 	"github.com/nethinwei/fino/model"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 	"github.com/nethinwei/fino/x/recover"
 )
 
@@ -67,7 +68,11 @@ func TestCrashRecoveryAtSafeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	want, err := rFull.Run(context.Background(), buildAgent(t), runner.Text("go"))
+	lFull, err := react.New(rFull)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	want, err := lFull.Run(context.Background(), buildAgent(t), runner.Text("go"))
 	if err != nil {
 		t.Fatalf("full Run: %v", err)
 	}
@@ -99,7 +104,11 @@ func TestCrashRecoveryAtSafeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New resume: %v", err)
 	}
-	got, err := snap2.Resume(context.Background(), rResume, buildAgent(t))
+	lResume, err := react.New(rResume)
+	if err != nil {
+		t.Fatalf("react.New resume: %v", err)
+	}
+	got, err := snap2.Resume(context.Background(), lResume, buildAgent(t))
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -123,7 +132,11 @@ func TestResumePendingAtMidBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	want, err := rFull.Run(context.Background(), buildAgent(t), runner.Text("go"))
+	lFull, err := react.New(rFull)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	want, err := lFull.Run(context.Background(), buildAgent(t), runner.Text("go"))
 	if err != nil {
 		t.Fatalf("full Run: %v", err)
 	}
@@ -144,7 +157,11 @@ func TestResumePendingAtMidBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner.New resume: %v", err)
 	}
-	got, err := snap.ResumePending(context.Background(), rResume, buildAgent(t))
+	lResume, err := react.New(rResume)
+	if err != nil {
+		t.Fatalf("react.New resume: %v", err)
+	}
+	got, err := snap.ResumePending(context.Background(), lResume, buildAgent(t))
 	if err != nil {
 		t.Fatalf("ResumePending: %v", err)
 	}

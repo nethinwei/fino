@@ -11,8 +11,14 @@ fino should be described as:
 > suspendable, resumable, replayable, and testable through explicit execution
 > contracts.
 
-The core continues to provide the ReAct loop and the seams required to execute it
-correctly. Product features such as graph orchestration, persistence, RAG, MCP,
+The core provides the single-step ReAct primitives and the execution-consistency
+mechanisms (suspend/resume, three-state policy, effect-aware concurrency,
+idempotency, stream-contract checks) required to execute one turn correctly, but
+no multi-turn loop — that lives in `x/react`. This mirrors the Anthropic SDK
+boundary, where the SDK exposes `messages` + `tool_use` and the agent loop is
+written by the user; fino's extra layer is the execution-consistency machinery
+that cannot be reconstructed by wrapping `Tool`, `Policy`, `Hook`, `Mode`, or
+`Model`. Product features such as graph orchestration, persistence, RAG, MCP,
 UI, enterprise RBAC, sandbox implementations, and prompt-injection classifiers
 remain outside the core.
 
@@ -60,6 +66,7 @@ in the core when they cannot be reconstructed reliably by wrapping `Tool`,
 | PR7 ✅ | Reference proof | Build a small safe coding-agent flow proving approval, resume, replay, and safe parallelism. | v0.7.0 |
 | PR8 ✅ | Stream-native suspension | Make `Runner.Stream` surface suspension as a first-class terminal event, with snapshot consistency and tool-use ID invariants. | v0.8.0 |
 | PR9 ✅ | AG-UI extension layer | Build `x/agui` as a full AG-UI compatibility adapter to validate the core's extensibility. | v0.9.0 |
+| PR10 ✅ | Loop extraction | Move the multi-turn ReAct loop out of the core into `x/react`; the core keeps single-step primitives (`runner.Runner.NewRun` / `Run.Step` / `Run.StreamStep` / `Runner.NewResumeRun`) and the execution-consistency mechanisms. | v0.9.1 |
 
 ## PR0: Contract Scope
 
@@ -241,6 +248,33 @@ Scope:
 
 This roadmap item is intentionally an extensibility proof, not a claim that AG-UI belongs in the core.
 
+## PR10: Loop Extraction
+
+Move the multi-turn ReAct loop out of the core. The core `runner` package keeps
+the single-step primitives — `Runner.NewRun` / `Run.Step` / `Run.StreamStep` /
+`Runner.NewResumeRun` / `Run.ResumePendingIfEnabled` — and the execution-
+consistency mechanisms (suspend/resume, three-state policy, effect-aware
+concurrency, idempotency, stream-contract checks). The turn-counted while-loop
+and the `Run` / `Stream` / `ResumeApproved` entry points move to `x/react` as
+`Loop.Run` / `Loop.Stream` / `Loop.ResumeApproved`, reusing all `runner.*` data
+types. `WithMaxTurns` moves with the loop to `react.WithMaxTurns`.
+
+Scope:
+
+1. Core exposes one ReAct turn at a time; it no longer ships a multi-turn loop.
+2. `x/react` composes the turns into the loop the core used to provide, so
+   callers that want a ready-made loop use it and callers that want their own
+   drive `Run.Step` directly.
+3. Adapters (`x/agui`, `x/eval`, `x/recover`) and examples switch to `x/react`.
+4. `x/replay`, `x/trace`, `x/budget`, and `providers/` are unchanged (they
+   reference data types or wrap `model`/`tool`, not the loop entry points).
+
+This is a breaking change (0.x semver): `runner.Runner.Run` / `Stream` /
+`ResumeApproved` / `WithMaxTurns` are removed. The loop-semantics invariants
+I1–I14 are unchanged in substance; those that are single-turn properties stay
+verified against the core's step primitives, and those that are multi-turn
+properties are verified against `x/react`.
+
 ## Version Plan
 
 | Version | Merge condition |
@@ -253,6 +287,7 @@ This roadmap item is intentionally an extensibility proof, not a claim that AG-U
 | v0.7.0 | PR7 reference proof merged. |
 | v0.8.0 | PR8 stream-native suspension merged. |
 | v0.9.0 | PR9 AG-UI extension layer merged. |
+| v0.9.1 | PR10 loop extraction merged. |
 | v1.0.0 | Contracts, property tests, replay fixtures, and reference case study are stable. |
 
 ## Non-Claims

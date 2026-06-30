@@ -15,6 +15,7 @@ import (
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
 	"github.com/nethinwei/fino/x/budget"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // loopingProvider always asks to call the noop tool, forcing more turns until
@@ -57,12 +58,16 @@ func TestBudgetStopsRunAndFiresOnErrorOnce(t *testing.T) {
 
 	var onErr atomic.Int64
 	h := &hooks.Hooks{OnError: func(context.Context, error) { onErr.Add(1) }}
-	r, err := runner.New(bm, runner.WithHooks(h), runner.WithMaxTurns(50))
+	r, err := runner.New(bm, runner.WithHooks(h))
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
+	l, err := react.New(r, react.WithMaxTurns(50))
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
 
-	res, err := r.Run(context.Background(), a, runner.Text("go"))
+	res, err := l.Run(context.Background(), a, runner.Text("go"))
 	if res != nil || !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("expected ErrBudgetExceeded, got res=%v err=%v", res, err)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/nethinwei/fino/policy"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 // streamModel yields the same event list on every Stream call.
@@ -115,7 +116,11 @@ func makeRuntime(t *testing.T, m model.Model, a *agent.Agent, opts ...runner.Opt
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	rt, err := NewRuntime(r, a)
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	rt, err := NewRuntime(l, a)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -387,7 +392,11 @@ func makeRuntimeWithStore(t *testing.T, m model.Model, a *agent.Agent, store Sus
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	rt, err := NewRuntime(r, a, WithSuspendStore(store))
+	l, err := react.New(r)
+	if err != nil {
+		t.Fatalf("react.New: %v", err)
+	}
+	rt, err := NewRuntime(l, a, WithSuspendStore(store))
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -560,7 +569,8 @@ func TestNewRuntimeRejectsNilAgent(t *testing.T) {
 	r, _ := runner.New(&streamModel{events: []model.Event{
 		model.TurnMessage{Message: message.Assistant(message.NewText("ok"))},
 	}})
-	if _, err := NewRuntime(r, nil); !errors.Is(err, ErrMissingAgent) {
+	l, _ := react.New(r)
+	if _, err := NewRuntime(l, nil); !errors.Is(err, ErrMissingAgent) {
 		t.Fatalf("err = %v, want ErrMissingAgent", err)
 	}
 }

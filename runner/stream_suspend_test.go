@@ -16,7 +16,7 @@ import (
 // batch on the Stream path, the Runner emits a terminal model.Suspended event
 // carrying the neutral snapshot (not a ToolDeniedError), runs no tool, and ends
 // iteration without an error. runner.SuspendedRunFrom rebuilds a SuspendedRun so
-// the caller can resume via ResumeApproved — giving Stream the same
+// the caller can resume via NewResumeRun — giving Stream the same
 // suspend/resume semantics as Run.
 
 func TestStreamSuspendEmitsSuspendedEvent(t *testing.T) {
@@ -30,17 +30,22 @@ func TestStreamSuspendEmitsSuspendedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_s"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var susp *model.Suspended
 	var streamErr error
-	for ev, err := range r.Stream(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_s")) {
-		if err != nil {
-			streamErr = err
+	rn.StreamStep(func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			streamErr = stepErr
 		}
 		if s, ok := ev.(model.Suspended); ok {
 			cp := s
 			susp = &cp
 		}
-	}
+		return true
+	})
 	if streamErr != nil {
 		t.Fatalf("stream err = %v, want nil (suspend is not an error)", streamErr)
 	}
@@ -74,24 +79,34 @@ func TestStreamSuspendResumesViaSuspendedRunFrom(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	a := testAgent(t, tl)
+	rn, err := r.NewRun(context.Background(), a, Text("hi"), WithRunID("run_s"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var susp *model.Suspended
-	for ev, err := range r.Stream(context.Background(), a, Text("hi"), WithRunID("run_s")) {
-		if err != nil {
-			t.Fatalf("stream err: %v", err)
+	rn.StreamStep(func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Fatalf("stream err: %v", stepErr)
 		}
 		if s, ok := ev.(model.Suspended); ok {
 			cp := s
 			susp = &cp
 		}
-	}
+		return true
+	})
 	if susp == nil {
 		t.Fatal("no model.Suspended event")
 	}
 	sr := SuspendedRunFrom(*susp)
-	res, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
+	rn2, err := r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn2.Result(out.FinalMessage)
 	if ran != 1 {
 		t.Fatalf("tool ran %d times, want 1 (approved on resume)", ran)
 	}
@@ -124,12 +139,17 @@ func TestStreamRejectsProviderYieldedSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-		if err != nil {
-			gotErr = err
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			gotErr = stepErr
+		}
+		return true
+	})
 	if !errors.Is(gotErr, ErrStreamContract) {
 		t.Fatalf("err = %v, want ErrStreamContract", gotErr)
 	}
@@ -171,17 +191,22 @@ func TestStreamRejectsProviderYieldedRunnerOnlyEvents(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
+			rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+			if err != nil {
+				t.Fatalf("NewRun: %v", err)
+			}
 			var gotErr error
 			var forwarded bool
-			for ev, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-				if err != nil {
-					gotErr = err
+			rn.StreamStep(func(ev model.Event, stepErr error) bool {
+				if stepErr != nil {
+					gotErr = stepErr
 				}
 				switch ev.(type) {
 				case model.ToolCall, model.ToolResult, model.Handoff:
 					forwarded = true
 				}
-			}
+				return true
+			})
 			if !errors.Is(gotErr, ErrStreamContract) {
 				t.Fatalf("err = %v, want ErrStreamContract", gotErr)
 			}

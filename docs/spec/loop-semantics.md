@@ -1,8 +1,10 @@
 # fino ReAct 循环形式化语义
 
-> 本文是 `fino` Runner 循环的规范性参考（normative reference）。它把 `docs/design.md` 中的散文描述升级为可机器检查的状态转移系统，并定义一组对任意输入都成立的不变量。`runner/runner.go` 是本规约的参考实现；当实现与本规约冲突时，以本规约为准并修正实现。
+> 本文是 `fino` ReAct 循环的规范性参考（normative reference）。它把 `docs/design.md` 中的散文描述升级为可机器检查的状态转移系统，并定义一组对任意输入都成立的不变量。
 >
-> 适用范围：`runner.Run`、`runner.Stream` 与 `runner.ResumeApproved`。涵盖 turn 边界、工具批次（串行与并行）、handoff、Policy 授权、Hooks 触发、`ctx` 取消、挂起与审批恢复、终止错误。
+> **v0.9.1 边界变更**：多轮循环已从核心 `runner` 移至 `x/react`。本文描述的循环语义不变，但实现拆为两层：核心 `runner` 提供单步原语（`Run.Step` / `Run.StreamStep` / `Runner.NewResumeRun` 等）与执行一致性机制，`x/react.Loop`（`Loop.Run` / `Loop.Stream` / `Loop.ResumeApproved`）按本规约的 turn 转移把它们拼成多轮循环。下文出现的 `Runner.Run` / `Runner.Stream` / `Runner.ResumeApproved` 指代该循环入口（现由 `x/react.Loop` 承载）；单步级行为（模型调用、工具批次、授权、hooks、idempotency、stream 事件）仍由核心原语实现。当实现与本规约冲突时，以本规约为准并修正实现。
+>
+> 适用范围：`react.Loop.Run`、`react.Loop.Stream` 与 `react.Loop.ResumeApproved`（由核心单步原语驱动）。涵盖 turn 边界、工具批次（串行与并行）、handoff、Policy 授权、Hooks 触发、`ctx` 取消、挂起与审批恢复、终止错误。
 
 ## 1. 记号
 
@@ -204,7 +206,7 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
                                     ErrStreamContract（仅 Stream：model.Stream 违反事件契约）。
                                     ⟶ 触发 OnError 恰好一次。
 
-构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、所选 mode 不存在；
+构造期 / 入参校验错误（进入循环前）: agent 为 nil、ErrSystemMessageInHistory、ErrPendingToolUseInHistory（history 尾为 dangling tool_use 且未启用 `WithResumeFromPendingTools`）、所选 mode 不存在；
                                     ResumeApproved 的 ErrResumeAgentMismatch、ErrSystemMessageInHistory、
                                     dangling 批的 ErrInvalidToolCallID/ErrDuplicateToolCallID（[T-RESUME] 步骤1），
                                     以及 wrap(ErrInvalidApproval)（ApprovalError，或快照非法：空 pending / mode override / dangling 缺失）。
@@ -217,7 +219,7 @@ execute(cᵢ)    : inject tool.ExecutionContext(ctx) → BeforeTool(ctx) → too
 
 `ResumeApproved` 在校验通过后进入 executeBatch；该阶段的工具执行错误属运行期终止错误，触发 OnError 恰好一次（与 `[T-TOOLS]` 一致）。
 
-可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`、`ErrNotSuspended`（`Result.SuspendedRun` 用）、`ErrInvalidApproval`（由 `ApprovalError.Unwrap` 暴露）、`ErrResumeAgentMismatch`、`ErrInvalidToolCallID`、`ErrDuplicateToolCallID`。`ErrNotSuspended` 与 `ErrInvalidApproval` 是不同条件，不得混淆。消费者用 `errors.Is` / `errors.As` 分支。
+可判别错误：`ErrMaxTurns`、`ErrToolNotFound`、`ErrSystemMessageInHistory`、`ErrPendingToolUseInHistory`、`ErrToolDenied`（由 `ToolDeniedError.Unwrap` 暴露）、`ErrStreamContract`、`ErrNotSuspended`（`Result.SuspendedRun` 用）、`ErrInvalidApproval`（由 `ApprovalError.Unwrap` 暴露）、`ErrResumeAgentMismatch`、`ErrInvalidToolCallID`、`ErrDuplicateToolCallID`。`ErrNotSuspended` 与 `ErrInvalidApproval` 是不同条件，不得混淆。消费者用 `errors.Is` / `errors.As` 分支。
 
 ## 7. 不变量
 
@@ -255,13 +257,13 @@ I10 当前只承诺安全边界续跑：当 history 已完成一个 turn 边界�
 I10 的检验暴露了一个潜在接缝缺口，并已得出决策（探针见 `runner/recover_seam_test.go`）：
 
 - **安全边界恢复**（history 末尾是 user/tool 消息或 assistant 文本消息）：无需任何核心改动。对持久化的 history 重新 `Run` 即可正确续跑。这是 `x/recover` 的实现契约。
-- **批次中途 / 人工确认（HITL）恢复**（history 末尾是含至少一个 `tool_use`、且其后无对应 `tool_result` 的 dangling assistant 消息）：默认 `[T-MODEL]` 总是先调用模型，不会“先执行 history 末尾的待办工具再继续”，因此默认不可直接续跑。为此暴露**唯一的最小接缝** `WithResumeFromPendingTools()`（RunOption）：
+- **批次中途 / 人工确认（HITL）恢复**（history 末尾是含至少一个 `tool_use`、且其后无对应 `tool_result` 的 dangling assistant 消息）：默认核心在 `prepareRun` 即拒绝（`ErrPendingToolUseInHistory`），不会进入 `[T-MODEL]` 把该 ill-formed history 喂给 provider，因此默认不可直接续跑。为此暴露**唯一的最小接缝** `WithResumeFromPendingTools()`（RunOption）：
 
   - **检测**：pending = 末条消息为 `RoleAssistant` 且含 ≥1 个 `tool_use` 时该消息的全部 `tool_use`；不要求该 assistant 消息仅含 `tool_use`（允许与 thinking/text 混排）。否则无 pending。
-  - **转移**：启用该接缝且存在 pending 时，在进入循环前先对 pending 执行一次 `[T-TOOLS]`（授权 → 执行 → 追加单条 `RoleTool` 消息；`Stream` 同时发出 `ToolCall`/`ToolResult`/批末 `Handoff`），随后照常进入 `[T-MODEL]`。关闭（默认）或无 pending 时为 no-op，行为与未启用时完全一致。
+  - **转移**：启用该接缝且存在 pending 时，在进入循环前先对 pending 执行一次 `[T-TOOLS]`（授权 → 执行 → 追加单条 `RoleTool` 消息；`Stream` 同时发出 `ToolCall`/`ToolResult`/批末 `Handoff`），随后照常进入 `[T-MODEL]`。关闭（默认）时若有 pending，`prepareRun` 直接返回 `ErrPendingToolUseInHistory`；无 pending 时为 no-op。
   - **纪律**：这是*暴露接缝*而非*实现能力*——不引入 checkpoint / session / graph 概念，恢复所需状态仍只是 history + mode。`x/recover` 的 `Snapshot.Resume` 可经 `runner.WithResumeFromPendingTools()` 透传以覆盖该边界；推荐直接用便捷入口 `Snapshot.ResumePending`，它已内置该接缝。
 
-  探针 `runner/recover_seam_test.go` 同时固定两侧行为：默认不自动执行 dangling 工具；启用接缝后执行之。
+  探针 `runner/recover_seam_test.go` 同时固定两侧行为：默认拒绝 dangling 工具历史（`ErrPendingToolUseInHistory`）；启用接缝后执行之。
 
 `WithResumeFromPendingTools()` 是**盲恢复**：它无条件执行全部 pending 工具，不带审批，适用于崩溃恢复（`x/recover`）。需要逐调用人工裁决时用 §7.3 的 `ResumeApproved`，二者并存且互不内嵌。
 

@@ -19,7 +19,7 @@
 - 公开类型、函数、常量用 PascalCase：`NewMode`、`RoleUser`、`TypeToolUse`
 - 未导出标识符用 camelCase：`runHistory`、`collectTools`
 - 错误变量以 `Err` 开头：`ErrMaxTurns`、`ErrToolNotFound`
-- 选项函数以 `With` 开头：`WithMaxTurns`、`WithModelOptions`
+- 选项函数以 `With` 开头：`WithMaxConcurrency`、`WithModelOptions`
 - 接口名用简单名词：`Model`、`Tool`、`Policy`，不用 `ModelInterface` 或 `ITool`
 - 缩写词全大写或全小写：`HTTP`、`JSON`、`ID`，不用 `Http`、`Json`、`Id`
 
@@ -76,7 +76,7 @@ func (e *ToolDeniedError) Unwrap() error {
 
 遵循 [Google Style Guide: Functions](https://google.github.io/styleguide/go/decisions#functions)：
 
-- 函数参数过多时考虑 option 模式，不硬编码布尔参数：`WithMaxTurns(10)` 优于 `New(m, 10, true, nil)`
+- 函数参数过多时考虑 option 模式，不硬编码布尔参数：`WithMaxConcurrency(2)` 优于 `New(m, 2, true, nil)`
 - 早返回，减少嵌套：先处理错误和边界条件，再写主逻辑
 - `if` 的初始化语句合理使用：`if err := ctx.Err(); err != nil { ... }`
 - 单个函数实现不超过 50 行，超过则拆分为更小的函数

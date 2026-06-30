@@ -15,40 +15,39 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
 )
 
-func TestResumeSeamProbe_DanglingToolUseNotAutoExecuted(t *testing.T) {
+func TestResumeSeamProbe_DanglingToolUseRejectedWithoutSeam(t *testing.T) {
 	history := []message.Message{
 		message.UserText("hi"),
 		message.Assistant(message.NewToolUse("c1", "alpha", json.RawMessage(`{}`))),
 	}
 	log := &eventLog{}
 	a := buildPropAgent(t, log)
-	m := &propModel{turns: []scriptTurn{{}}} // next response is a final text turn
+	m := &propModel{turns: []scriptTurn{{}}} // would be a final text turn, but never reached
 
 	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Messages(history))
-	if err != nil {
-		t.Fatalf("Run error: %v", err)
+	// Without the resume seam, a dangling tool_use tail is not a safe boundary
+	// (I10): the core rejects it up front rather than forwarding an ill-formed
+	// history to the model. The seam (WithResumeFromPendingTools) is the only
+	// way to execute the pending batch.
+	_, err = r.NewRun(context.Background(), a, Messages(history))
+	if !errors.Is(err, ErrPendingToolUseInHistory) {
+		t.Fatalf("error = %v, want ErrPendingToolUseInHistory", err)
 	}
-
-	// The pending tool_use is NOT auto-executed: the Runner called the model
-	// instead. This is the default behavior documented in §7.2.
-	if m.i == 0 {
-		t.Fatal("expected the model to be called; pending tools are not auto-executed (seam gap absent?)")
+	if m.i != 0 {
+		t.Fatal("model should not be called; the history is rejected before any model turn")
 	}
 	if containsEvent(log.snapshot(), "run:alpha") {
 		t.Fatal("pending tool executed without a resume seam; core behavior changed unexpectedly")
-	}
-	if res == nil {
-		t.Fatal("expected a result from re-running over the history")
 	}
 }
 
@@ -69,10 +68,22 @@ func TestResumeFromPendingTools_ExecutesDanglingBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Messages(history), WithResumeFromPendingTools())
+	rn, err := r.NewRun(context.Background(), a, Messages(history), WithResumeFromPendingTools())
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	pending, err := rn.ResumePendingIfEnabled()
+	if err != nil {
+		t.Fatalf("ResumePendingIfEnabled: %v", err)
+	}
+	if len(pending) > 0 {
+		t.Fatalf("unexpected suspend: %+v", pending)
+	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step error: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if !containsEvent(log.snapshot(), "run:alpha") {
 		t.Fatal("pending tool was not executed under WithResumeFromPendingTools")
 	}
@@ -116,10 +127,18 @@ func TestResumeFromPendingTools_MixedContentTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Messages(history), WithResumeFromPendingTools())
+	rn, err := r.NewRun(context.Background(), a, Messages(history), WithResumeFromPendingTools())
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	if _, err := rn.ResumePendingIfEnabled(); err != nil {
+		t.Fatalf("ResumePendingIfEnabled: %v", err)
+	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step error: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if !containsEvent(log.snapshot(), "run:alpha") {
 		t.Fatal("pending tool in a thinking+text+tool_use message was not executed")
 	}
@@ -144,10 +163,14 @@ func TestResumeFromPendingTools_StreamExecutesDanglingBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), a, Messages(history), WithResumeFromPendingTools())
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var sawToolCall, sawToolResult, sawFinal bool
-	for ev, err := range r.Stream(context.Background(), a, Messages(history), WithResumeFromPendingTools()) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectEvents := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Fatalf("Stream error: %v", stepErr)
 		}
 		switch ev.(type) {
 		case model.ToolCall:
@@ -156,6 +179,16 @@ func TestResumeFromPendingTools_StreamExecutesDanglingBatch(t *testing.T) {
 			sawToolResult = true
 		case model.FinalMessage:
 			sawFinal = true
+		}
+		return true
+	}
+	out, err := rn.StreamResumePendingIfEnabled(collectEvents)
+	if err != nil {
+		t.Fatalf("StreamResumePendingIfEnabled: %v", err)
+	}
+	if out.Status == StepContinue {
+		if _, err := rn.StreamStep(collectEvents); err != nil {
+			t.Fatalf("StreamStep: %v", err)
 		}
 	}
 	if !sawToolCall || !sawToolResult {
@@ -181,10 +214,18 @@ func TestResumeFromPendingTools_NoOpWhenTailNotPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Text("hi"), WithResumeFromPendingTools())
+	rn, err := r.NewRun(context.Background(), a, Text("hi"), WithResumeFromPendingTools())
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	if _, err := rn.ResumePendingIfEnabled(); err != nil {
+		t.Fatalf("ResumePendingIfEnabled: %v", err)
+	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if len(log.snapshot()) != 0 {
 		t.Fatalf("no tool should run when the tail is not pending; got %v", log.snapshot())
 	}

@@ -2,6 +2,12 @@
 
 ## 状态
 
+> **v0.9.1 边界变更**：多轮 ReAct 循环已从核心 `runner` 移至 `x/react`。核心只提供
+> 单步原语（`Runner.NewRun` / `Run.Step` / `Run.StreamStep` / `Runner.NewResumeRun`）与
+> 执行一致性机制；多轮循环入口是 `react.Loop.Run` / `Loop.Stream` / `Loop.ResumeApproved`
+> + `react.WithMaxTurns`。数据类型（`Result`、`Input`、`SuspendedRun`、`Approval` 等）
+> 仍属 `runner`。语义不变；本文档示例代码已更新为新 API。
+
 本文档记录 `fino` 的初始设计。它参考了以下项目：
 
 - `eino`：宽边界的图编排、组件和 Agent 框架
@@ -41,12 +47,12 @@ SDK 应把这个循环暴露为小而可组合的 Go 原语。CLI、服务端、
 | 工具 | `tool.Tool` 接口和函数工具 helper | 包装文件系统、bash、MCP、RAG、浏览器、数据库或任意业务 API |
 | 权限 | `policy.Policy` 接口 | 实现确认、RBAC、审计、沙箱、allowlist、风险评分 |
 | 模式 | `agent.Mode` | 实现 plan/code/review/debug 等不同提示词和工具集 |
-| 执行 | `runner.Run` | 外层接工作流库、HTTP handler、CLI loop、队列 worker 或 cron |
+| 执行 | `runner` 单步原语 + `x/react.Loop` | 外层接工作流库、HTTP handler、CLI loop、队列 worker 或 cron |
 | 历史 | 显式消息输入 | 用户接入 SQLite、Redis、文件、云存储或自己的 session 系统 |
 | 流式 | 语义事件 | 用户接终端 UI、WebSocket、SSE、日志系统或 tracing |
 | 转移 | handoff tool helper | 用户可实现 LLM 驱动转移，也可用普通 Go 控制流实现确定性编排 |
 
-一个能力进入核心包的条件：它必须是 ReAct 反馈循环的一部分，且不能被 Tool、Policy、Hook、Mode、Model 或 Runner 外层代码干净实现。否则它应该留在用户代码、示例或 add-on 包。
+一个能力进入核心包的条件：它必须是单个 ReAct 回合的一部分，且不能被 Tool、Policy、Hook、Mode、Model 或 Runner 单步原语外层代码干净实现。否则它应该留在用户代码、`x/react`、示例或 add-on 包。多轮 turn 编排本身不进入核心——它由 `x/react` 或用户代码基于 `Run.Step` 组合。
 
 ## 从参考项目学到什么
 
@@ -248,7 +254,7 @@ plan, err := agent.NewMode(
     agent.WithModelOptions(model.WithTemperature(0)),
 )
 
-result, err := runner.Run(ctx, a, runner.Text("implement this"), runner.WithMode("plan"))
+result, err := l.Run(ctx, a, runner.Text("implement this"), runner.WithMode("plan"))
 ```
 
 ### Agent
@@ -271,24 +277,20 @@ a, err := agent.New(
 Runner 负责执行。
 
 ```go
-r, err := runner.New(
-    model,
-    runner.WithPolicy(policy),
-    runner.WithHooks(hooks),
-    runner.WithMaxTurns(20),
-)
+r, err := runner.New(model, runner.WithPolicy(policy), runner.WithHooks(hooks))
+l, err := react.New(r, react.WithMaxTurns(20))
 
-result, err := r.Run(ctx, agent, runner.Text("write a HTTP server"), runner.WithMode("code"))
+result, err := l.Run(ctx, agent, runner.Text("write a HTTP server"), runner.WithMode("code"))
 ```
 
-`WithMaxTurns(20)` 是显式覆盖。Runner 默认 `MaxTurns` 是 10。一个 turn 定义为一次模型调用；同一个模型响应中的多个 tool call 仍属于同一个 turn，handoff 后目标 Agent 的下一次模型调用算下一个 turn。
+`react.WithMaxTurns(20)` 是显式覆盖。`react.Loop` 默认 `maxTurns` 是 10。一个 turn 定义为一次模型调用；同一个模型响应中的多个 tool call 仍属于同一个 turn，handoff 后目标 Agent 的下一次模型调用算下一个 turn。
 
 为保持最小边界，Runner 不强制内置 Session。它接受显式输入，用户可以直接传一条文本，也可以传完整历史消息。
 
 ```go
-result, err := r.Run(ctx, agent, runner.Text("write a HTTP server"), runner.WithMode("code"))
+result, err := l.Run(ctx, agent, runner.Text("write a HTTP server"), runner.WithMode("code"))
 
-result, err := r.Run(ctx, agent, runner.Messages(history), runner.WithMode("code"))
+result, err := l.Run(ctx, agent, runner.Messages(history), runner.WithMode("code"))
 ```
 
 其中 `history` 可以来自用户自己的 SQLite、Redis、文件、云存储或任何 session 库。
@@ -328,7 +330,7 @@ type Result struct {
 Runner 同时提供流式执行：
 
 ```go
-events := r.Stream(ctx, agent, runner.Text("write a HTTP server"), runner.WithMode("code"))
+events := l.Stream(ctx, agent, runner.Text("write a HTTP server"), runner.WithMode("code"))
 for event, err := range events {
     if err != nil {
         return err
@@ -556,6 +558,7 @@ Runner 暴露可判别错误类型，方便用户用 `errors.Is` 或 `errors.As`
 - `ErrMaxTurns`
 - `ErrToolNotFound`
 - `ErrSystemMessageInHistory`
+- `ErrPendingToolUseInHistory`（history 尾为 dangling `tool_use` 且未启用 `WithResumeFromPendingTools`；多数 provider 会拒绝该 history，核心在 `prepareRun` 即拒绝）
 - `ErrToolDenied`（sentinel，由 `ToolDeniedError.Unwrap` 暴露）
 - `ErrStreamContract`（仅 Stream：`model.Stream` 违反 `TurnMessage`/`FinalMessage` 事件契约）
 - `ErrInvalidToolCallID` / `ErrDuplicateToolCallID`（tool_use ID 为空或批内重复，在授权/执行前 fail-fast）
@@ -608,7 +611,8 @@ a, err := agent.New(
 )
 
 r, err := runner.New(model)
-result, err := r.Run(ctx, a, runner.Text("inspect this project"))
+l, _ := react.New(r)
+result, err := l.Run(ctx, a, runner.Text("inspect this project"))
 ```
 
 ## 初始核心包结构
@@ -654,11 +658,11 @@ fino/
 
 ### 图编排
 
-用户可以用任意 Go workflow/DAG 库把 `runner.Run` 作为一个节点函数。
+用户可以用任意 Go workflow/DAG 库把 `react.Loop.Run` 作为一个节点函数。
 
 ```go
-planResult, err := r.Run(ctx, planner, runner.Text(task), runner.WithMode("plan"))
-codeResult, err := r.Run(ctx, coder, runner.Text(planResult.Text), runner.WithMode("code"))
+planResult, err := l.Run(ctx, planner, runner.Text(task), runner.WithMode("plan"))
+codeResult, err := l.Run(ctx, coder, runner.Text(planResult.Text), runner.WithMode("code"))
 ```
 
 这比在 SDK 内实现 Graph 更自由，也避免 SDK 绑定某一种图状态模型。
@@ -692,8 +696,8 @@ SDK 不内置这些模式，但它们应当是几行用户代码即可定义的�
 
 权限确认不需要复杂 checkpoint，分两层：
 
-- **挂起（Policy 决策）**：Policy 返回 `DecisionSuspend`，`runner.Run` 在执行该批工具前停下，返回 `Result{Suspended: true, PendingCalls: …}`，history 末尾保留 dangling 的 `tool_use`。这是非错误终止，不触发 OnError。
-- **审批恢复（一等 API）**：`Result.SuspendedRun()` 提取值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls}`（纯数据，不含活对象引用）；外层收集人工裁决 `[]Approval`（按 CallID 批准或拒绝），连同活的 agent 调用 `runner.ResumeApproved(ctx, agent, suspended, approvals)` 续跑：批准的（及同批原本 Allow 的）调用执行真实工具，被拒绝的写入模型可见的 `IsError` `tool_result`，随后续接 ReAct 循环。`ResumeApproved` 不重新调用 Policy——人工审批即最终决定。
+- **挂起（Policy 决策）**：Policy 返回 `DecisionSuspend`，`react.Loop.Run` 在执行该批工具前停下，返回 `Result{Suspended: true, PendingCalls: …}`，history 末尾保留 dangling 的 `tool_use`。这是非错误终止，不触发 OnError。
+- **审批恢复（一等 API）**：`Result.SuspendedRun()` 提取值快照 `SuspendedRun{Messages, LastAgentName, LastMode, PendingCalls}`（纯数据，不含活对象引用）；外层收集人工裁决 `[]Approval`（按 CallID 批准或拒绝），连同活的 agent 调用 `l.ResumeApproved(ctx, agent, suspended, approvals)` 续跑：批准的（及同批原本 Allow 的）调用执行真实工具，被拒绝的写入模型可见的 `IsError` `tool_result`，随后续接 ReAct 循环。`ResumeApproved` 不重新调用 Policy——人工审批即最终决定。
 
 恢复只保存 history、agent/mode 名称和待执行调用，不引入图状态 checkpoint。快照只记录 `LastAgentName`（纯数据，不含活对象引用；能否 JSON 序列化取决于 tool metadata 是否可 marshal，核心不清洗），活 agent 由调用方重建后显式传入；handoff 后活跃 agent 已切换，`ResumeApproved` 据 `LastAgentName` 校验传入 agent，避免在错误上下文中 resolve 工具。它还拒绝带 system message 的历史、空 pending 与 mode override，使公开入口不绕过核心不变量。完整状态转移见 `docs/spec/loop-semantics.md` §3 `[T-RESUME]` 与 §7.3（不变量 I12）。
 
@@ -814,7 +818,7 @@ type ReplayModel struct{ Log *Log } // 不调用任何真实 provider
 
 - 依赖接缝：当前不变量“安全边界恢复完备”。
 - 实现：在安全边界（history 末尾为 tool 结果、user 消息或无 pending tool_use 的 assistant 文本）上序列化 `(history, mode)`；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
-- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的恢复有两条路径：**盲恢复**用唯一最小接缝 `runner.WithResumeFromPendingTools()`（默认关闭，opt-in 时在首个模型 turn 前无条件执行 history 末尾的 pending tools），`x/recover` 的 `Snapshot.ResumePending` 透传它，适用于崩溃恢复；**人工审批恢复**用一等 API `runner.ResumeApproved`（逐调用批准/拒绝），它工作在 `SuspendedRun` 快照而非 `Snapshot` 上，`x/recover` 不参与。两者并存、互不内嵌。见 `docs/spec/loop-semantics.md` §7.2/§7.3。
+- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的恢复有两条路径：**盲恢复**用唯一最小接缝 `runner.WithResumeFromPendingTools()`（默认关闭：关闭时 history 尾为 dangling `tool_use` 会被 `ErrPendingToolUseInHistory` 拒绝；opt-in 时在首个模型 turn 前无条件执行 history 末尾的 pending tools），`x/recover` 的 `Snapshot.ResumePending` 透传它，适用于崩溃恢复；**人工审批恢复**用一等 API `react.Loop.ResumeApproved`（逐调用批准/拒绝），它工作在 `SuspendedRun` 快照而非 `Snapshot` 上，`x/recover` 不参与。两者并存、互不内嵌。见 `docs/spec/loop-semantics.md` §7.2/§7.3。
 - 证明：崩溃恢复、长时运行无需核心新增中断子系统。
 
 ### 可观测性（tracing / metrics）

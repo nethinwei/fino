@@ -26,12 +26,25 @@ var (
 	// ErrSystemMessageInHistory indicates the run input contained a system
 	// message; the Runner injects system instructions from the mode instead.
 	ErrSystemMessageInHistory = errors.New("system message in history")
+	// ErrPendingToolUseInHistory indicates the run input ended in a dangling
+	// assistant tool_use (no following tool_result) while the resume-from-pending
+	// seam was not enabled. Such a history is not a safe boundary
+	// (loop-semantics I10): most providers reject it, and the core refuses to
+	// forward it. Enable WithResumeFromPendingTools to execute the pending batch
+	// before the first model turn, or capture the snapshot at a completed turn
+	// boundary instead.
+	ErrPendingToolUseInHistory = errors.New("pending tool_use in history without resume seam")
 	// ErrToolDenied is the sentinel wrapped by ToolDeniedError when a Policy denies a tool call.
 	ErrToolDenied = errors.New("tool denied")
 	// ErrStreamContract indicates a model.Model.Stream implementation violated
 	// its event contract: it must yield exactly one TurnMessage per turn and must
 	// not yield FinalMessage (FinalMessage is emitted only by the Runner).
 	ErrStreamContract = errors.New("model stream contract violated")
+	// ErrNilModelMessage indicates a model.Model.Generate implementation
+	// returned a nil message with a nil error, violating the contract that a
+	// successful generation yields a non-nil message. The Runner treats this as
+	// a terminal run error rather than nil-dereferencing the message.
+	ErrNilModelMessage = errors.New("model returned nil message")
 	// ErrInvalidToolCallID indicates a tool_use block carried an empty ID. The
 	// Runner rejects the batch before authorizing or executing any tool, because
 	// approval, the idempotency key, and the replay tape all key on the ID.
@@ -59,11 +72,12 @@ func (e *ToolDeniedError) Unwrap() error {
 	return ErrToolDenied
 }
 
-// Runner executes the ReAct loop against an Agent. It holds only configuration
-// (model, turn limit, policy, hooks); each Run owns its own message list.
+// Runner holds the configuration shared across runs: the model, the
+// authorization policy, the lifecycle hooks, and the tool-concurrency bound. It
+// holds no turn limit and no loop — the multi-turn ReAct loop lives in x/react.
+// A Runner is immutable configuration; each Run owns its own message list.
 type Runner struct {
 	model          model.Model
-	maxTurns       int
 	policy         policy.Policy
 	hooks          *hooks.Hooks
 	maxConcurrency int
@@ -73,26 +87,19 @@ type Runner struct {
 type Option func(*Runner)
 
 // New creates a Runner with the given model and options. It returns an error if
-// the model is nil or the configured maximum turns is not positive. The
-// defaults are 10 turns and an AllowAll policy.
+// the model is nil. The default policy is AllowAll.
 func New(m model.Model, opts ...Option) (*Runner, error) {
 	if m == nil {
 		return nil, errors.New("model is required")
 	}
-	r := &Runner{model: m, maxTurns: 10, policy: policy.AllowAll{}}
+	r := &Runner{model: m, policy: policy.AllowAll{}}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(r)
 		}
 	}
-	if r.maxTurns <= 0 {
-		return nil, errors.New("max turns must be positive")
-	}
 	return r, nil
 }
-
-// WithMaxTurns sets the maximum number of model turns per run.
-func WithMaxTurns(n int) Option { return func(r *Runner) { r.maxTurns = n } }
 
 // WithPolicy sets the authorization policy consulted before each tool call. A
 // nil policy is ignored, preserving the default AllowAll.
@@ -202,8 +209,13 @@ func WithModelOptions(opts ...model.Option) RunOption {
 // ability to continue a run that was interrupted after the model requested tools
 // but before they ran (e.g. while awaiting human approval), without introducing
 // any checkpoint, session, or graph concept. When the seam is off (the default)
-// or the tail has no pending tool_use, it is a no-op and the run starts at the
-// model as usual.
+// and the tail carries a pending tool_use, prepareRun rejects the input with
+// ErrPendingToolUseInHistory; when the tail has no pending tool_use it is a
+// no-op and the run starts at the model as usual.
+//
+// The resumed tail batch runs before the turn loop, so it does not count
+// against any turn limit an outer loop enforces — only subsequent model
+// turns do.
 func WithResumeFromPendingTools() RunOption {
 	return func(c *runConfig) { c.resumePending = true }
 }
@@ -286,6 +298,14 @@ func (r *Runner) prepareRun(a *agent.Agent, input Input, opts []RunOption) (*run
 			opt(&cfg)
 		}
 	}
+	// A history whose tail is a dangling assistant tool_use is not a safe
+	// boundary (I10): most providers reject it, and without the resume seam the
+	// core has no way to execute the pending batch first. Reject it up front
+	// rather than forwarding an ill-formed request. The seam (checked above via
+	// cfg.resumePending, which an option may have just enabled) opts back in.
+	if !cfg.resumePending && len(pendingToolUses(input.messages)) > 0 {
+		return nil, ErrPendingToolUseInHistory
+	}
 	mode, ok := a.Mode(cfg.modeName)
 	if !ok {
 		return nil, fmt.Errorf("mode %q not found", cfg.modeName)
@@ -364,79 +384,6 @@ func pendingToolUses(history []message.Message) []message.ToolUse {
 	return last.ToolUses()
 }
 
-// Run executes the ReAct loop until the model returns a message with no tool
-// calls, the turn limit is reached, or an error occurs. It returns an error if
-// the agent is nil, the input contains a system message, or the selected mode
-// is not found.
-func (r *Runner) Run(ctx context.Context, a *agent.Agent, input Input, opts ...RunOption) (*Result, error) {
-	st, err := r.prepareRun(a, input, opts)
-	if err != nil {
-		return nil, err
-	}
-	ctx, pending, err := r.resumePendingTools(ctx, st)
-	if err != nil {
-		return nil, err
-	}
-	if len(pending) > 0 {
-		return st.suspendedResult(pending), nil
-	}
-	return r.loop(ctx, st)
-}
-
-// loop drives the ReAct turns from the current run state: generate, and if the
-// model requested tools, run the batch and append its results, until the model
-// returns no tool calls (completed), a batch suspends (suspended Result), the
-// turn limit is reached, or an error occurs. It is the shared continuation used
-// by Run and by ResumeApproved after the resumed batch is appended.
-func (r *Runner) loop(ctx context.Context, st *runState) (*Result, error) {
-	for turn := 0; turn < r.maxTurns; turn++ {
-		if err := ctx.Err(); err != nil {
-			r.onError(ctx, err)
-			return nil, err
-		}
-		newCtx, msg, err := r.generate(ctx, st)
-		if err != nil {
-			return nil, err
-		}
-		ctx = newCtx
-		calls := msg.ToolUses()
-		if len(calls) == 0 {
-			return st.result(msg), nil
-		}
-		var pending []PendingToolCall
-		ctx, pending, err = r.runToolCalls(ctx, st, calls)
-		if err != nil {
-			return nil, err
-		}
-		if len(pending) > 0 {
-			return st.suspendedResult(pending), nil
-		}
-	}
-	err := fmt.Errorf("%w: %d", ErrMaxTurns, r.maxTurns)
-	r.onError(ctx, err)
-	return nil, err
-}
-
-// resumePendingTools executes the input history's tail pending tool calls before
-// the loop, when the resume-from-pending seam is enabled. It is a no-op when the
-// seam is off or the tail has no pending tool_use. Executing the pending batch
-// appends its single tool_result message, so the following model turn observes a
-// well-formed history and the ReAct loop continues normally.
-func (r *Runner) resumePendingTools(ctx context.Context, st *runState) (context.Context, []PendingToolCall, error) {
-	if !st.cfg.resumePending {
-		return ctx, nil, nil
-	}
-	pending := pendingToolUses(st.history)
-	if len(pending) == 0 {
-		return ctx, nil, nil
-	}
-	if err := ctx.Err(); err != nil {
-		r.onError(ctx, err)
-		return ctx, nil, err
-	}
-	return r.runToolCalls(ctx, st, pending)
-}
-
 // generate builds the model input from the run state, invokes the model, fires
 // the BeforeModel and AfterModel hooks, and appends the response to history. It
 // returns the hook-updated context and the model's message.
@@ -449,6 +396,11 @@ func (r *Runner) generate(ctx context.Context, st *runState) (context.Context, *
 	ctx = r.beforeModel(ctx, st.agent.Name(), st.mode.Name, modelMessages, infos)
 	msg, err := r.model.Generate(ctx, modelMessages, infos, modelOpts...)
 	if err != nil {
+		r.onError(ctx, err)
+		return ctx, nil, err
+	}
+	if msg == nil {
+		err = fmt.Errorf("%w: model returned nil message", ErrNilModelMessage)
 		r.onError(ctx, err)
 		return ctx, nil, err
 	}
@@ -486,6 +438,7 @@ func (r *Runner) runToolCalls(ctx context.Context, st *runState, calls []message
 	// matches the parallel path (loop-semantics §4 equivalence; handoff is
 	// batch-terminal).
 	if err := st.applyHandoffs(selected); err != nil {
+		r.onError(ctx, err)
 		return ctx, nil, err
 	}
 	st.history = append(st.history, message.ToolResults(blocks...))
@@ -605,6 +558,7 @@ func (r *Runner) finishToolCallsParallel(ctx context.Context, st *runState, sele
 		return ctx, nil, err
 	}
 	if err := st.applyHandoffs(selected); err != nil {
+		r.onError(ctx, err)
 		return ctx, nil, err
 	}
 	st.history = append(st.history, message.ToolResults(resultBlocks(calls, outcomes)...))

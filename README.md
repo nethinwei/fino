@@ -34,13 +34,13 @@ Most agent frameworks grow until they own your application. `fino` does the oppo
 | Observability | `hooks.Hooks` | Logging, tracing, metrics, cost accounting |
 | Multi-agent | handoff tool helper | LLM-driven or deterministic Go control flow |
 | Memory & history | explicit message input | SQLite, Redis, files, your own session store |
-| Execution | `runner.Run` / `runner.Stream` | HTTP handlers, CLI loops, queues, cron, workflows |
+| Execution | `react.Loop.Run` / `react.Loop.Stream` (`x/react`) | HTTP handlers, CLI loops, queues, cron, workflows |
 
-A capability earns a place in the core only if it is part of the ReAct loop **and** cannot be implemented cleanly via a Tool, Policy, Hook, Mode, Model, or code around the Runner. Otherwise it belongs in your code — not ours.
+A capability earns a place in the core only if it is part of a ReAct turn **and** cannot be implemented cleanly via a Tool, Policy, Hook, Mode, Model, or code around the Runner's single-step primitives. Otherwise it belongs in your code — not ours. The core provides one turn at a time; the multi-turn loop lives in `x/react` (or your own).
 
 ## Features
 
-- **ReAct loop, done right** — turn limits, tool authorization, lifecycle hooks, and clean termination.
+- **Single-step ReAct primitives, done right** — the core drives one turn (model call + authorize/execute the tool batch) via `Run.Step` / `Run.StreamStep`, with tool authorization, lifecycle hooks, suspend/resume, effect-aware concurrency, and clean termination. `x/react` composes them into a turn-limited loop.
 - **Streaming as first-class semantic events** — text deltas, live reasoning, tool calls, tool results, handoffs, a complete assistant snapshot per model turn (`TurnMessage`), and one run-terminal event — `FinalMessage` on completion or `Suspended` when a policy suspends for approval — all via `iter.Seq2`.
 - **Modes** — one agent, multiple personas (distinct instructions, tools, and model options).
 - **Handoffs** — model-driven transfer between agents, modeled as an ordinary tool.
@@ -74,6 +74,7 @@ import (
 	"github.com/nethinwei/fino/providers/deepseek"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 type addInput struct {
@@ -93,7 +94,8 @@ func main() {
 	a, _ := agent.New("assistant", agent.WithMode(mode), agent.WithDefaultMode("default"))
 
 	r, _ := runner.New(m)
-	result, _ := r.Run(context.Background(), a, runner.Text("What is 2 + 3? Use the add tool."))
+	l, _ := react.New(r)
+	result, _ := l.Run(context.Background(), a, runner.Text("What is 2 + 3? Use the add tool."))
 	fmt.Println(result.Text())
 }
 ```
@@ -115,17 +117,19 @@ model/    Model interface (Generate + Stream), stream event types
 agent/    Agent, Mode (instructions + tools), handoff tool helper
 policy/   Policy interface (pre-execution authorization), AllowAll default
 hooks/    lifecycle hooks (BeforeModel / AfterModel / BeforeTool / AfterTool / OnError)
-runner/   the ReAct loop executor — Run, Stream, Input, Result
+runner/   single-step ReAct primitives — NewRun, Step, StreamStep, NewResumeRun, Input, Result
+x/react/  reference multi-turn loop — Loop.Run, Loop.Stream, Loop.ResumeApproved
 ```
 
-The Runner holds only configuration; **each run owns its own message list**, so one Runner is safe to reuse across concurrent runs.
+The Runner holds only configuration; **each run owns its own message list**, so one Runner is safe to reuse across concurrent runs. The core does not ship a multi-turn loop — `x/react` provides the reference loop, or write your own over `Run.Step`.
 
 ## Streaming
 
 `Stream` yields semantic events you can pipe straight into a terminal UI, WebSocket, or trace.
 
 ```go
-for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
+// l, _ := react.New(r)  // build a Loop from the Runner above
+for ev, err := range l.Stream(ctx, a, runner.Text(prompt)) {
 	if err != nil {
 		log.Fatal(err) // terminal error; iteration stops
 	}
@@ -148,7 +152,7 @@ for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
 		// a policy suspended the batch for human approval; rebuild a
 		// SuspendedRun and resume after collecting approvals:
 		//   sr := runner.SuspendedRunFrom(e)
-		//   r.ResumeApproved(ctx, a, sr, approvals)
+		//   l.ResumeApproved(ctx, a, sr, approvals)
 	}
 }
 ```
@@ -186,6 +190,7 @@ func (confirmPolicy) Authorize(ctx context.Context, req policy.Request) (policy.
 }
 
 r, _ := runner.New(m, runner.WithPolicy(confirmPolicy{}))
+l, _ := react.New(r)
 ```
 
 A denied call surfaces as a `*runner.ToolDeniedError`; a returned error means the policy system itself failed — the two are distinct by design.
@@ -205,6 +210,7 @@ r, _ := runner.New(m, runner.WithHooks(&hooks.Hooks{
 	},
 	OnError: func(ctx context.Context, err error) { log.Printf("error: %v", err) },
 }))
+l, _ := react.New(r)
 ```
 
 ## Modes & multi-agent handoff
@@ -216,7 +222,8 @@ plan, _ := agent.NewMode("plan", "Think and outline. Do not edit files.")
 code, _ := agent.NewMode("code", "Implement the plan.", agent.WithTools(editFile))
 a, _ := agent.New("assistant", agent.WithMode(plan), agent.WithMode(code), agent.WithDefaultMode("plan"))
 
-result, _ := r.Run(ctx, a, runner.Text("Add a /health endpoint"), runner.WithMode("code"))
+// r, _ := runner.New(m); l, _ := react.New(r)  // from a Runner + Loop above
+result, _ := l.Run(ctx, a, runner.Text("Add a /health endpoint"), runner.WithMode("code"))
 
 // Hand control to a specialist agent — modeled as a plain tool:
 handoff, _ := agent.NewHandoffTool(reviewer)
@@ -276,7 +283,7 @@ fino's thesis is that **reliable execution infrastructure for complex tool-using
 | Add-on | Problem | Seam it rides on |
 | --- | --- | --- |
 | [`x/replay`](x/replay) | Reproducibility & audit | records an execution tape over public seams — model responses, policy decisions, tool executions, suspends, approvals, resumes, and termination; replay drives the run without calling real providers, tools, or policies |
-| [`x/recover`](x/recover) | Crash recovery & durable continuation | safe-boundary continuation (`history + mode`) plus an opt-in pending-tool seam for blind/crash resume; HITL approval resume is `runner.ResumeApproved`, not `x/recover` |
+| [`x/recover`](x/recover) | Crash recovery & durable continuation | safe-boundary continuation (`history + mode`) plus an opt-in pending-tool seam for blind/crash resume; HITL approval resume is `react.Loop.ResumeApproved`, not `x/recover` |
 | [`x/trace`](x/trace) | Tracing & observability | deterministic `hooks.Hooks` firing |
 | [`x/budget`](x/budget) | Cost / token budgets | a `model.Model` decorator |
 | [`x/eval`](x/eval) | Reproducible regression testing | runs deterministic cases over the recorded tape; `RunWithOptions` can wire `ReplayPolicy` for policy-sensitive fixtures |
