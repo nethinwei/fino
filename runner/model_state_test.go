@@ -329,7 +329,11 @@ func TestHarnessSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	res, err := r.RunMax(s.maxTurns, context.Background(), a, Text("hi"))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	res, err := runSteps(rn)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}

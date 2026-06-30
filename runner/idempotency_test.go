@@ -61,7 +61,11 @@ func TestRunInjectsExecutionContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_123")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_123"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
 	ec := cap.seen["a"]
@@ -85,7 +89,11 @@ func TestRunWithoutRunIDEmptyKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, tl), Text("hi")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
 	ec := cap.seen["a"]
@@ -125,7 +133,11 @@ func TestBeforeToolHookSeesExecutionContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, echo), Text("hi"), WithRunID("run_9")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"), WithRunID("run_9"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
 	if !hookOK {
@@ -147,10 +159,15 @@ func TestSuspendedRunCarriesRunID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_r"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_r"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.SuspendedResult(out.PendingCalls)
 	if !res.Suspended {
 		t.Fatalf("run did not suspend")
 	}
@@ -176,16 +193,25 @@ func TestResumeApprovedReusesSuspendedRunID(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	a := testAgent(t, tl)
-	res, err := r.Run(context.Background(), a, Text("hi"), WithRunID("run_r"))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"), WithRunID("run_r"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.SuspendedResult(out.PendingCalls)
 	sr, err := res.SuspendedRun()
 	if err != nil {
 		t.Fatalf("SuspendedRun: %v", err)
 	}
-	if _, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}}); err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+	rn2, err := r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
+	if err != nil {
+		t.Fatalf("NewResumeRun: %v", err)
+	}
+	if _, err := rn2.Step(); err != nil {
+		t.Fatalf("Step: %v", err)
 	}
 	// The approved call runs on resume and must see the same IdempotencyKey it
 	// would have in the original run: a deterministic function of the suspended
@@ -210,7 +236,11 @@ func TestParallelInjectsPerCallExecutionContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_p")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"), WithRunID("run_p"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
 	if cap.seen["a"].ToolCallID != "call_a" || cap.seen["a"].IdempotencyKey != "run_p:call_a" {

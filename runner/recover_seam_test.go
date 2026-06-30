@@ -34,10 +34,15 @@ func TestResumeSeamProbe_DanglingToolUseNotAutoExecuted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Messages(history))
+	rn, err := r.NewRun(context.Background(), a, Messages(history))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step error: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 
 	// The pending tool_use is NOT auto-executed: the Runner called the model
 	// instead. This is the default behavior documented in §7.2.
@@ -69,10 +74,22 @@ func TestResumeFromPendingTools_ExecutesDanglingBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Messages(history), WithResumeFromPendingTools())
+	rn, err := r.NewRun(context.Background(), a, Messages(history), WithResumeFromPendingTools())
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	pending, err := rn.ResumePendingIfEnabled()
+	if err != nil {
+		t.Fatalf("ResumePendingIfEnabled: %v", err)
+	}
+	if len(pending) > 0 {
+		t.Fatalf("unexpected suspend: %+v", pending)
+	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step error: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if !containsEvent(log.snapshot(), "run:alpha") {
 		t.Fatal("pending tool was not executed under WithResumeFromPendingTools")
 	}
@@ -116,10 +133,18 @@ func TestResumeFromPendingTools_MixedContentTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Messages(history), WithResumeFromPendingTools())
+	rn, err := r.NewRun(context.Background(), a, Messages(history), WithResumeFromPendingTools())
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	if _, err := rn.ResumePendingIfEnabled(); err != nil {
+		t.Fatalf("ResumePendingIfEnabled: %v", err)
+	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step error: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if !containsEvent(log.snapshot(), "run:alpha") {
 		t.Fatal("pending tool in a thinking+text+tool_use message was not executed")
 	}
@@ -144,10 +169,14 @@ func TestResumeFromPendingTools_StreamExecutesDanglingBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), a, Messages(history), WithResumeFromPendingTools())
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var sawToolCall, sawToolResult, sawFinal bool
-	for ev, err := range r.Stream(context.Background(), a, Messages(history), WithResumeFromPendingTools()) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectEvents := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Fatalf("Stream error: %v", stepErr)
 		}
 		switch ev.(type) {
 		case model.ToolCall:
@@ -156,6 +185,16 @@ func TestResumeFromPendingTools_StreamExecutesDanglingBatch(t *testing.T) {
 			sawToolResult = true
 		case model.FinalMessage:
 			sawFinal = true
+		}
+		return true
+	}
+	out, err := rn.StreamResumePendingIfEnabled(collectEvents)
+	if err != nil {
+		t.Fatalf("StreamResumePendingIfEnabled: %v", err)
+	}
+	if out.Status == StepContinue {
+		if _, err := rn.StreamStep(collectEvents); err != nil {
+			t.Fatalf("StreamStep: %v", err)
 		}
 	}
 	if !sawToolCall || !sawToolResult {
@@ -181,10 +220,18 @@ func TestResumeFromPendingTools_NoOpWhenTailNotPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Text("hi"), WithResumeFromPendingTools())
+	rn, err := r.NewRun(context.Background(), a, Text("hi"), WithResumeFromPendingTools())
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	if _, err := rn.ResumePendingIfEnabled(); err != nil {
+		t.Fatalf("ResumePendingIfEnabled: %v", err)
+	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if len(log.snapshot()) != 0 {
 		t.Fatalf("no tool should run when the tail is not pending; got %v", log.snapshot())
 	}

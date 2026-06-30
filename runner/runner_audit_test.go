@@ -40,7 +40,11 @@ func TestRunWithModeSelectsMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Text("hi"), WithMode("plan"))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"), WithMode("plan"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	res, err := runSteps(rn)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -90,8 +94,13 @@ func TestRunHandoffToolNotInNewMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	if _, err := r.Run(context.Background(), source, Text("hi")); !errors.Is(err, ErrToolNotFound) {
-		t.Fatalf("Run error = %v, want ErrToolNotFound", err)
+	rn, err := r.NewRun(context.Background(), source, Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	_, runErr := runSteps(rn)
+	if !errors.Is(runErr, ErrToolNotFound) {
+		t.Fatalf("Run error = %v, want ErrToolNotFound", runErr)
 	}
 }
 
@@ -123,7 +132,11 @@ func TestPolicyReceivesFullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, echo), Text("hi")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if pol.req.AgentName != "assistant" {
@@ -159,7 +172,11 @@ func TestPolicySeesToolEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, echo), Text("hi")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got := pol.req.Tool.Effects; got != want {

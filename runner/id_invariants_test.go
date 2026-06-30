@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nethinwei/fino/message"
+	"github.com/nethinwei/fino/model"
 )
 
 // These tests pin the tool-use ID invariants (v0.8.0 / P0-2): every tool_use the
@@ -27,8 +28,13 @@ func TestRunRejectsEmptyToolCallID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, tl), Text("hi")); !errors.Is(err, ErrInvalidToolCallID) {
-		t.Fatalf("err = %v, want ErrInvalidToolCallID", err)
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	_, stepErr := rn.Step()
+	if !errors.Is(stepErr, ErrInvalidToolCallID) {
+		t.Fatalf("err = %v, want ErrInvalidToolCallID", stepErr)
 	}
 	if ran != 0 {
 		t.Fatalf("tool ran %d times, want 0 (rejected before execution)", ran)
@@ -48,8 +54,13 @@ func TestRunRejectsDuplicateToolCallID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, tl), Text("hi")); !errors.Is(err, ErrDuplicateToolCallID) {
-		t.Fatalf("err = %v, want ErrDuplicateToolCallID", err)
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	_, stepErr := rn.Step()
+	if !errors.Is(stepErr, ErrDuplicateToolCallID) {
+		t.Fatalf("err = %v, want ErrDuplicateToolCallID", stepErr)
 	}
 	if ran != 0 {
 		t.Fatalf("tool ran %d times, want 0 (rejected before execution)", ran)
@@ -69,12 +80,17 @@ func TestStreamRejectsDuplicateToolCallID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, tl), Text("hi")) {
-		if err != nil {
-			gotErr = err
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t, tl), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			gotErr = stepErr
+		}
+		return true
+	})
 	if !errors.Is(gotErr, ErrDuplicateToolCallID) {
 		t.Fatalf("stream err = %v, want ErrDuplicateToolCallID", gotErr)
 	}
@@ -104,7 +120,8 @@ func TestResumeApprovedRejectsDuplicateDanglingToolCallID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "dup", Approved: true}}); !errors.Is(err, ErrDuplicateToolCallID) {
+	_, err = r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "dup", Approved: true}})
+	if !errors.Is(err, ErrDuplicateToolCallID) {
 		t.Fatalf("err = %v, want ErrDuplicateToolCallID", err)
 	}
 }

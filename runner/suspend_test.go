@@ -53,7 +53,7 @@ func countingTool(t *testing.T, name string, ran *int32) tool.Tool {
 	return tl
 }
 
-// Test 4 & 9: suspend halts Run with a Suspended Result that carries the pending
+// Test 4 & 9: suspend halts with a Suspended Result carrying the pending
 // call and whose history ends with the dangling assistant tool_use message.
 func TestRunSuspendHaltsWithResult(t *testing.T) {
 	var ran int32
@@ -66,10 +66,18 @@ func TestRunSuspendHaltsWithResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t, fetch), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, fetch), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	out, err := rn.Step()
 	if err != nil {
 		t.Fatalf("Run error = %v, want nil (suspend is not an error)", err)
 	}
+	if out.Status != StepSuspended {
+		t.Fatalf("status = %v, want StepSuspended", out.Status)
+	}
+	res := rn.SuspendedResult(out.PendingCalls)
 	if !res.Suspended {
 		t.Fatal("Suspended = false, want true")
 	}
@@ -106,8 +114,12 @@ func TestRunSuspendDoesNotTriggerOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, fetch), Text("hi")); err != nil {
-		t.Fatalf("Run: %v", err)
+	rn, err := r.NewRun(context.Background(), testAgent(t, fetch), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := rn.Step(); err != nil {
+		t.Fatalf("Step: %v", err)
 	}
 	if n := ch.onError.Load(); n != 0 {
 		t.Fatalf("OnError fired %d times on suspend, want 0", n)
@@ -129,10 +141,18 @@ func TestRunMixedAllowSuspendBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t, allow, susp), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, allow, susp), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if out.Status != StepSuspended {
+		t.Fatalf("status = %v, want StepSuspended", out.Status)
+	}
+	res := rn.SuspendedResult(out.PendingCalls)
 	if !res.Suspended {
 		t.Fatal("Suspended = false, want true")
 	}
@@ -168,13 +188,14 @@ func TestRunDenyTakesPrecedenceOverSuspend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t, fetch, blocked), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, fetch, blocked), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	_, err = rn.Step()
 	var tde *ToolDeniedError
 	if !errors.As(err, &tde) {
 		t.Fatalf("error = %v, want ToolDeniedError", err)
-	}
-	if res != nil {
-		t.Fatalf("result = %+v, want nil on deny", res)
 	}
 }
 
@@ -191,7 +212,11 @@ func TestRunDenyIndexZeroFailFast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, blocked, alpha), Text("hi")); !errors.Is(err, ErrToolDenied) {
+	rn, err := r.NewRun(context.Background(), testAgent(t, blocked, alpha), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := rn.Step(); !errors.Is(err, ErrToolDenied) {
 		t.Fatalf("error = %v, want ErrToolDenied", err)
 	}
 	for _, name := range pol.authed {
@@ -218,7 +243,11 @@ func TestRunDenyPreventsEarlierAllowedExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, alpha, blocked), Text("hi")); !errors.Is(err, ErrToolDenied) {
+	rn, err := r.NewRun(context.Background(), testAgent(t, alpha, blocked), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := rn.Step(); !errors.Is(err, ErrToolDenied) {
 		t.Fatalf("error = %v, want ErrToolDenied", err)
 	}
 	if ran != 0 {
@@ -239,10 +268,18 @@ func TestRunParallelSuspendHalts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t, alpha, fetch), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, alpha, fetch), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if out.Status != StepSuspended {
+		t.Fatalf("status = %v, want StepSuspended", out.Status)
+	}
+	res := rn.SuspendedResult(out.PendingCalls)
 	if !res.Suspended || len(res.PendingCalls) != 1 || res.PendingCalls[0].Call.Name != "fetch" {
 		t.Fatalf("res = {Suspended:%v Pending:%+v}, want suspended with only fetch", res.Suspended, res.PendingCalls)
 	}
@@ -259,10 +296,15 @@ func TestRunCompletedResultNotSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if res.Suspended || len(res.PendingCalls) != 0 {
 		t.Fatalf("res = {Suspended:%v Pending:%+v}, want completed", res.Suspended, res.PendingCalls)
 	}
@@ -283,17 +325,22 @@ func TestStreamParallelSuspendEmitsSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, alpha, fetch), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
 	var susp *model.Suspended
 	var streamErr error
-	for ev, err := range r.Stream(context.Background(), testAgent(t, alpha, fetch), Text("hi")) {
-		if err != nil {
-			streamErr = err
+	rn.StreamStep(func(ev model.Event, e error) bool {
+		if e != nil {
+			streamErr = e
 		}
 		if s, ok := ev.(model.Suspended); ok {
 			cp := s
 			susp = &cp
 		}
-	}
+		return true
+	})
 	if streamErr != nil {
 		t.Fatalf("stream error = %v, want nil (suspend is not an error)", streamErr)
 	}

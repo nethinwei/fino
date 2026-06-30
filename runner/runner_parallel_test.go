@@ -59,6 +59,22 @@ func parallelSafeHandoff(t *testing.T, handoff tool.Tool) tool.Tool {
 	return effectHandoffTool{HandoffTool: h, effects: parallelSafeEffects}
 }
 
+// runSteps drives rn through Step calls until done or error.
+func runSteps(rn *Run) (*Result, error) {
+	for {
+		out, err := rn.Step()
+		if err != nil {
+			return nil, err
+		}
+		if out.Status == StepCompleted {
+			return rn.Result(out.FinalMessage), nil
+		}
+		if out.Status == StepSuspended {
+			return rn.SuspendedResult(out.PendingCalls), nil
+		}
+	}
+}
+
 func TestRunMaxConcurrencyFallsBackToSerialForUnspecifiedEffects(t *testing.T) {
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -95,8 +111,13 @@ func TestRunMaxConcurrencyFallsBackToSerialForUnspecifiedEffects(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := r.Run(context.Background(), testAgent(t, first, second), Text("hi"))
-		done <- runErr
+		rn, err := r.NewRun(context.Background(), testAgent(t, first, second), Text("hi"))
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = runSteps(rn)
+		done <- err
 	}()
 
 	<-firstStarted
@@ -145,8 +166,13 @@ func TestRunMaxConcurrencyFallsBackToSerialForMixedParallelSafety(t *testing.T) 
 
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := r.Run(context.Background(), testAgent(t, first, second), Text("hi"))
-		done <- runErr
+		rn, err := r.NewRun(context.Background(), testAgent(t, first, second), Text("hi"))
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = runSteps(rn)
+		done <- err
 	}()
 
 	<-firstStarted
@@ -190,8 +216,13 @@ func TestRunParallelExecutesConcurrently(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := r.Run(context.Background(), testAgent(t, tools...), Text("hi"))
-		done <- runErr
+		rn, err := r.NewRun(context.Background(), testAgent(t, tools...), Text("hi"))
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = runSteps(rn)
+		done <- err
 	}()
 	select {
 	case runErr := <-done:
@@ -221,7 +252,11 @@ func TestRunParallelPreservesResultOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), testAgent(t, tools...), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, tools...), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	result, err := runSteps(rn)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -266,7 +301,11 @@ func TestRunParallelBoundedConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, tools...), Text("hi")); err != nil {
+	rn, err := r.NewRun(context.Background(), testAgent(t, tools...), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	if _, err := runSteps(rn); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
 	if maxSeen > limit {
@@ -289,7 +328,11 @@ func TestRunParallelPolicyDenial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), testAgent(t, tools...), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, tools...), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	_, err = runSteps(rn)
 	var tde *ToolDeniedError
 	if !errors.As(err, &tde) {
 		t.Fatalf("error = %v, want ToolDeniedError", err)
@@ -316,7 +359,11 @@ func TestRunParallelToolErrorFailFast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), testAgent(t, failing, sibling), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, failing, sibling), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	_, err = runSteps(rn)
 	if !errors.Is(err, boom) {
 		t.Fatalf("error = %v, want boom", err)
 	}
@@ -345,7 +392,11 @@ func TestRunParallelHandoffLastWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), source, Text("hi"))
+	rn, err := r.NewRun(context.Background(), source, Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	result, err := runSteps(rn)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -371,13 +422,18 @@ func TestStreamParallelEventsAndBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, tools...), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
 	var toolCalls, toolResults, finals int
 	var callOrder []string
-	for event, err := range r.Stream(context.Background(), testAgent(t, tools...), Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectEvents := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Errorf("Stream error: %v", stepErr)
+			return false
 		}
-		switch e := event.(type) {
+		switch e := ev.(type) {
 		case model.ToolCall:
 			toolCalls++
 			callOrder = append(callOrder, e.Call.ID)
@@ -386,6 +442,14 @@ func TestStreamParallelEventsAndBatch(t *testing.T) {
 		case model.FinalMessage:
 			finals++
 		}
+		return true
+	}
+	out, err := rn.StreamStep(collectEvents)
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("StreamStep 1: err=%v status=%v", err, out.Status)
+	}
+	if _, err := rn.StreamStep(collectEvents); err != nil {
+		t.Fatalf("StreamStep 2 error: %v", err)
 	}
 	if toolCalls != 2 || toolResults != 2 || finals != 1 {
 		t.Fatalf("toolCalls=%d toolResults=%d finals=%d, want 2/2/1", toolCalls, toolResults, finals)
@@ -433,10 +497,26 @@ func TestStreamMaxConcurrencyFallsBackToSerialForUnspecifiedEffects(t *testing.T
 
 	done := make(chan error, 1)
 	go func() {
+		rn, err := r.NewRun(context.Background(), testAgent(t, first, second), Text("hi"))
+		if err != nil {
+			done <- err
+			return
+		}
 		var streamErr error
-		for _, err := range r.Stream(context.Background(), testAgent(t, first, second), Text("hi")) {
+		for {
+			out, err := rn.StreamStep(func(ev model.Event, e error) bool {
+				if e != nil {
+					streamErr = e
+					return false
+				}
+				return true
+			})
 			if err != nil {
 				streamErr = err
+				break
+			}
+			if out.Status != StepContinue {
+				break
 			}
 		}
 		done <- streamErr
@@ -490,10 +570,26 @@ func TestStreamMaxConcurrencyFallsBackToSerialForMixedParallelSafety(t *testing.
 
 	done := make(chan error, 1)
 	go func() {
+		rn, err := r.NewRun(context.Background(), testAgent(t, first, second), Text("hi"))
+		if err != nil {
+			done <- err
+			return
+		}
 		var streamErr error
-		for _, err := range r.Stream(context.Background(), testAgent(t, first, second), Text("hi")) {
+		for {
+			out, err := rn.StreamStep(func(ev model.Event, e error) bool {
+				if e != nil {
+					streamErr = e
+					return false
+				}
+				return true
+			})
 			if err != nil {
 				streamErr = err
+				break
+			}
+			if out.Status != StepContinue {
+				break
 			}
 		}
 		done <- streamErr
@@ -521,7 +617,11 @@ func TestRunParallelSingleCallUsesSerialPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	result, err := runSteps(rn)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}

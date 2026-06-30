@@ -3,11 +3,10 @@ package runner
 // Behavior tests for PR3 approved resume. They pin the design in
 // docs/superpowers/specs/2026-06-02-approved-resume-design.md: Result.SuspendedRun()
 // extracts a value snapshot (including LastAgentName) from a suspended Result;
-// Runner.ResumeApproved validates the passed agent against LastAgentName, validates
-// approvals, executes approved (and previously-allowed) calls, writes rejections
-// as model-visible tool_result blocks, and continues the ReAct loop. Validation
-// failures return ApprovalError (wrapping ErrInvalidApproval, distinct from
-// ErrNotSuspended) without OnError; execution errors fire OnError.
+// Runner.NewResumeRun validates the passed agent against LastAgentName, validates
+// approvals, and returns a Run ready to drive post-resume turns with Step.
+// Validation failures return ApprovalError (wrapping ErrInvalidApproval, distinct
+// from ErrNotSuspended) without OnError; execution errors fire OnError.
 
 import (
 	"context"
@@ -19,17 +18,25 @@ import (
 	"github.com/nethinwei/fino/message"
 )
 
-// suspendOnRun runs r and asserts the run suspended, returning the result.
+// suspendOnRun drives r until it suspends, returning the suspended result.
 func suspendOnRun(t *testing.T, r *Runner, a *agent.Agent) *Result {
 	t.Helper()
-	res, err := r.Run(context.Background(), a, Text("hi"))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
-	if !res.Suspended {
-		t.Fatalf("Run did not suspend; res = %+v", res)
+	for {
+		out, err := rn.Step()
+		if err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		if out.Status == StepSuspended {
+			return rn.SuspendedResult(out.PendingCalls)
+		}
+		if out.Status == StepCompleted {
+			t.Fatalf("completed without suspending")
+		}
 	}
-	return res
 }
 
 // Test 1: Result.SuspendedRun() returns a snapshot carrying the agent/mode
@@ -71,10 +78,15 @@ func TestSuspendedRunOnCompletedResultErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.Run(context.Background(), testAgent(t), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("NewRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	_, err = res.SuspendedRun()
 	if !errors.Is(err, ErrNotSuspended) {
 		t.Fatalf("err = %v, want ErrNotSuspended", err)
@@ -101,10 +113,15 @@ func TestResumeApprovedExecutesTool(t *testing.T) {
 	a := testAgent(t, fetch)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	res2, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
+	rn2, err := r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res2 := rn2.Result(out.FinalMessage)
 	if res2.Suspended {
 		t.Fatal("res2 suspended, want completed")
 	}
@@ -133,11 +150,16 @@ func TestResumeApprovedRejectWritesError(t *testing.T) {
 	a := testAgent(t, del)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	res2, err := r.ResumeApproved(context.Background(), a, sr,
+	rn2, err := r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: false, Reason: "user denied"}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res2 := rn2.Result(out.FinalMessage)
 	if ran != 0 {
 		t.Fatalf("delete_file ran %d, want 0 (rejected)", ran)
 	}
@@ -177,9 +199,13 @@ func TestResumeApprovedMixedAllowSuspend(t *testing.T) {
 	if len(sr.PendingCalls) != 1 || sr.PendingCalls[0].Call.ID != "call_2" {
 		t.Fatalf("PendingCalls = %+v, want only call_2", sr.PendingCalls)
 	}
-	if _, err := r.ResumeApproved(context.Background(), a, sr,
-		[]Approval{{CallID: "call_2", Approved: true}}); err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+	rn2, err := r.NewResumeRun(context.Background(), a, sr,
+		[]Approval{{CallID: "call_2", Approved: true}})
+	if err != nil {
+		t.Fatalf("NewResumeRun: %v", err)
+	}
+	if _, err := rn2.Step(); err != nil {
+		t.Fatalf("Step: %v", err)
 	}
 	if aRan != 1 || fRan != 1 {
 		t.Fatalf("ran (alpha=%d fetch=%d), want both 1", aRan, fRan)
@@ -201,9 +227,13 @@ func TestResumeApprovedRejectionModelVisible(t *testing.T) {
 	a := testAgent(t, del)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	if _, err := r.ResumeApproved(context.Background(), a, sr,
-		[]Approval{{CallID: "call_1", Approved: false, Reason: "denied"}}); err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+	rn2, err := r.NewResumeRun(context.Background(), a, sr,
+		[]Approval{{CallID: "call_1", Approved: false, Reason: "denied"}})
+	if err != nil {
+		t.Fatalf("NewResumeRun: %v", err)
+	}
+	if _, err := rn2.Step(); err != nil {
+		t.Fatalf("Step: %v", err)
 	}
 	if len(m.calls) < 2 {
 		t.Fatalf("model called %d times, want >= 2", len(m.calls))
@@ -224,7 +254,7 @@ func TestResumeApprovedRejectionModelVisible(t *testing.T) {
 	}
 }
 
-// Test 7: ResumeApproved does not re-consult the Policy for the suspended calls.
+// Test 7: NewResumeRun does not re-consult the Policy for the suspended calls.
 func TestResumeApprovedDoesNotReauthorize(t *testing.T) {
 	var ran int32
 	fetch := countingTool(t, "fetch", &ran)
@@ -241,9 +271,13 @@ func TestResumeApprovedDoesNotReauthorize(t *testing.T) {
 	res := suspendOnRun(t, r, a)
 	authedAfterRun := len(pol.authed)
 	sr, _ := res.SuspendedRun()
-	if _, err := r.ResumeApproved(context.Background(), a, sr,
-		[]Approval{{CallID: "call_1", Approved: true}}); err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+	rn2, err := r.NewResumeRun(context.Background(), a, sr,
+		[]Approval{{CallID: "call_1", Approved: true}})
+	if err != nil {
+		t.Fatalf("NewResumeRun: %v", err)
+	}
+	if _, err := rn2.Step(); err != nil {
+		t.Fatalf("Step: %v", err)
 	}
 	if len(pol.authed) != authedAfterRun {
 		t.Fatalf("policy authorized %d extra times during resume, want 0", len(pol.authed)-authedAfterRun)
@@ -277,7 +311,7 @@ func TestResumeApprovedMissingApproval(t *testing.T) {
 	r, a, r1, r2 := twoPendingSetup(t)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	_, err := r.ResumeApproved(context.Background(), a, sr,
+	_, err := r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: true}})
 	var ae *ApprovalError
 	if !errors.As(err, &ae) {
@@ -303,7 +337,7 @@ func TestResumeApprovedUnknownCallID(t *testing.T) {
 	r, a, _, _ := twoPendingSetup(t)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	_, err := r.ResumeApproved(context.Background(), a, sr, []Approval{
+	_, err := r.NewResumeRun(context.Background(), a, sr, []Approval{
 		{CallID: "call_1", Approved: true},
 		{CallID: "call_2", Approved: true},
 		{CallID: "call_99", Approved: true},
@@ -322,7 +356,7 @@ func TestResumeApprovedDuplicateApproval(t *testing.T) {
 	r, a, _, _ := twoPendingSetup(t)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	_, err := r.ResumeApproved(context.Background(), a, sr, []Approval{
+	_, err := r.NewResumeRun(context.Background(), a, sr, []Approval{
 		{CallID: "call_1", Approved: true},
 		{CallID: "call_2", Approved: true},
 		{CallID: "call_1", Approved: true},
@@ -388,10 +422,10 @@ func handoffThenSuspend(t *testing.T, finalText string) (*Runner, *agent.Agent, 
 func TestResumeApprovedAgentMismatch(t *testing.T) {
 	r, a, _, res, ran := handoffThenSuspend(t, "")
 	sr, _ := res.SuspendedRun()
-	_, err := r.ResumeApproved(context.Background(), a, sr,
+	_, err := r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: true}})
 	if err == nil {
-		t.Fatal("ResumeApproved with wrong agent returned nil, want error")
+		t.Fatal("NewResumeRun with wrong agent returned nil, want error")
 	}
 	if *ran != 0 {
 		t.Fatalf("fetch ran %d on agent mismatch, want 0", *ran)
@@ -403,11 +437,16 @@ func TestResumeApprovedAgentMismatch(t *testing.T) {
 func TestResumeApprovedHandoffThenSuspendThenResume(t *testing.T) {
 	r, _, b, res, ran := handoffThenSuspend(t, "final")
 	sr, _ := res.SuspendedRun()
-	res2, err := r.ResumeApproved(context.Background(), b, sr,
+	rn2, err := r.NewResumeRun(context.Background(), b, sr,
 		[]Approval{{CallID: "call_1", Approved: true}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res2 := rn2.Result(out.FinalMessage)
 	if *ran != 1 {
 		t.Fatalf("fetch ran %d, want 1", *ran)
 	}
@@ -453,11 +492,16 @@ func TestResumeApprovedHandoffInBatch(t *testing.T) {
 	}
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	res2, err := r.ResumeApproved(context.Background(), a, sr,
+	rn2, err := r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "h1", Approved: true}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res2 := rn2.Result(out.FinalMessage)
 	if res2.LastAgent != b {
 		t.Fatalf("LastAgent = %v, want B after approved handoff", res2.LastAgent)
 	}
@@ -470,7 +514,7 @@ func TestResumeApprovedValidationDoesNotFireOnError(t *testing.T) {
 	r.hooks = ch.hooks()
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	_, err := r.ResumeApproved(context.Background(), a, sr,
+	_, err := r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: true}})
 	if err == nil {
 		t.Fatal("want ApprovalError, got nil")
@@ -496,17 +540,18 @@ func TestResumeApprovedExecutionErrorFiresOnError(t *testing.T) {
 	a := testAgent(t, boom)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	_, err = r.ResumeApproved(context.Background(), a, sr,
+	// NewResumeRun executes the approved batch immediately; boom fails there.
+	_, err = r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: true}})
 	if err == nil {
-		t.Fatal("want execution error, got nil")
+		t.Fatal("want execution error from NewResumeRun, got nil")
 	}
 	if n := ch.onError.Load(); n != 1 {
 		t.Fatalf("OnError fired %d times, want exactly 1", n)
 	}
 }
 
-// Test 16: maxConcurrency does not change ResumeApproved; the resumed batch runs
+// Test 16: maxConcurrency does not change resume; the resumed batch runs
 // serially and the result is identical.
 func TestResumeApprovedParallelNotAffected(t *testing.T) {
 	var aRan, fRan int32
@@ -524,11 +569,16 @@ func TestResumeApprovedParallelNotAffected(t *testing.T) {
 	a := testAgent(t, alpha, fetch)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	res2, err := r.ResumeApproved(context.Background(), a, sr,
+	rn2, err := r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_2", Approved: true}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res2 := rn2.Result(out.FinalMessage)
 	if aRan != 1 || fRan != 1 {
 		t.Fatalf("ran (alpha=%d fetch=%d), want both 1", aRan, fRan)
 	}
@@ -556,7 +606,7 @@ func TestResumeApprovedRejectsEmptyPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = r.ResumeApproved(context.Background(), a, sr, nil)
+	_, err = r.NewResumeRun(context.Background(), a, sr, nil)
 	if !errors.Is(err, ErrInvalidApproval) {
 		t.Fatalf("err = %v, want ErrInvalidApproval", err)
 	}
@@ -585,7 +635,7 @@ func TestResumeApprovedRejectsSystemMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = r.ResumeApproved(context.Background(), a, sr,
+	_, err = r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: true}})
 	if !errors.Is(err, ErrSystemMessageInHistory) {
 		t.Fatalf("err = %v, want ErrSystemMessageInHistory", err)
@@ -609,7 +659,7 @@ func TestResumeApprovedRejectsModeOverride(t *testing.T) {
 	a := testAgent(t, fetch)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	_, err = r.ResumeApproved(context.Background(), a, sr,
+	_, err = r.NewResumeRun(context.Background(), a, sr,
 		[]Approval{{CallID: "call_1", Approved: true}}, WithMode("other"))
 	if !errors.Is(err, ErrInvalidApproval) {
 		t.Fatalf("err = %v, want ErrInvalidApproval on mode override", err)
@@ -619,7 +669,7 @@ func TestResumeApprovedRejectsModeOverride(t *testing.T) {
 	}
 }
 
-// Test 17 (I12): after ResumeApproved, every tool_use in the suspended batch has
+// Test 17 (I12): after resume, every tool_use in the suspended batch has
 // a corresponding tool_result in the single appended RoleTool message.
 func TestResumeApprovedI12EveryToolUseHasResult(t *testing.T) {
 	var r1, r2 int32
@@ -637,13 +687,18 @@ func TestResumeApprovedI12EveryToolUseHasResult(t *testing.T) {
 	a := testAgent(t, keep, drop)
 	res := suspendOnRun(t, r, a)
 	sr, _ := res.SuspendedRun()
-	res2, err := r.ResumeApproved(context.Background(), a, sr, []Approval{
+	rn2, err := r.NewResumeRun(context.Background(), a, sr, []Approval{
 		{CallID: "call_1", Approved: true},
 		{CallID: "call_2", Approved: false, Reason: "no"},
 	})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn2.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res2 := rn2.Result(out.FinalMessage)
 	resultIDs := map[string]bool{}
 	for _, msg := range res2.Messages {
 		if msg.Role != message.RoleTool {

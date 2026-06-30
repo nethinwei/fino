@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"iter"
 	"testing"
 
@@ -68,12 +67,16 @@ func TestRunReturnsFinalText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), testAgent(t), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun error: %v", err)
 	}
-	if result.Text() != "hello" {
-		t.Fatalf("text = %q, want hello", result.Text())
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step error: %v", err)
+	}
+	if out.FinalMessage.Text() != "hello" {
+		t.Fatalf("text = %q, want hello", out.FinalMessage.Text())
 	}
 }
 
@@ -92,12 +95,20 @@ func TestRunExecutesToolAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun error: %v", err)
 	}
-	if result.Text() != "final" {
-		t.Fatalf("text = %q, want final", result.Text())
+	out, err := rn.Step()
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("Step 1: err=%v status=%v, want nil/StepContinue", err, out.Status)
+	}
+	out, err = rn.Step()
+	if err != nil {
+		t.Fatalf("Step 2 error: %v", err)
+	}
+	if out.FinalMessage.Text() != "final" {
+		t.Fatalf("text = %q, want final", out.FinalMessage.Text())
 	}
 }
 
@@ -119,10 +130,19 @@ func TestRunMultipleToolCallsBatchResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun error: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("Step 1: err=%v status=%v", err, out.Status)
+	}
+	out, err = rn.Step()
+	if err != nil {
+		t.Fatalf("Step 2 error: %v", err)
+	}
+	result := rn.Result(out.FinalMessage)
 	// The tool message should be a single RoleTool message with 2 tool_result blocks.
 	// Messages: [system, user, assistant(tool_uses), tool(results), assistant(final)]
 	toolMsgs := 0
@@ -146,7 +166,7 @@ func TestRunRejectsSystemMessageInHistory(t *testing.T) {
 		t.Fatalf("New runner error: %v", err)
 	}
 	history := []message.Message{message.SystemText("should fail")}
-	_, err = r.Run(context.Background(), testAgent(t), Messages(history))
+	_, err = r.NewRun(context.Background(), testAgent(t), Messages(history))
 	if !errors.Is(err, ErrSystemMessageInHistory) {
 		t.Fatalf("error = %v, want ErrSystemMessageInHistory", err)
 	}
@@ -166,46 +186,18 @@ func TestRunMergesModelOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), a, Text("hi"), WithModelOptions(model.WithMaxTokens(100)))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"), WithModelOptions(model.WithMaxTokens(100)))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun error: %v", err)
+	}
+	if _, err := rn.Step(); err != nil {
+		t.Fatalf("Step error: %v", err)
 	}
 	if len(m.opts) != 1 {
 		t.Fatalf("expected 1 model call, got %d", len(m.opts))
 	}
 	if len(m.opts[0]) != 2 {
 		t.Fatalf("expected 2 opts (mode + run), got %d", len(m.opts[0]))
-	}
-}
-
-func TestRunDefaultMaxTurns(t *testing.T) {
-	responses := make([]message.Message, 11)
-	for i := range responses {
-		responses[i] = message.Assistant(message.NewToolUse(fmt.Sprintf("call_%d", i), "echo", json.RawMessage(`{"text":"x"}`)))
-	}
-	echo, _ := tool.NewFunc("echo", "Echo text", func(ctx context.Context, in echoInput) (string, error) {
-		return "ok", nil
-	})
-	m := &scriptedModel{responses: responses}
-	r, err := New(m)
-	if err != nil {
-		t.Fatalf("New runner error: %v", err)
-	}
-	_, err = r.Run(context.Background(), testAgent(t, echo), Text("hi"))
-	if !errors.Is(err, ErrMaxTurns) {
-		t.Fatalf("error = %v, want ErrMaxTurns", err)
-	}
-}
-
-func TestRunWithMaxTurns(t *testing.T) {
-	m := &scriptedModel{responses: []message.Message{message.Assistant(message.NewText("ok"))}}
-	r, err := New(m)
-	if err != nil {
-		t.Fatalf("New runner error: %v", err)
-	}
-	_, err = r.RunMax(20, context.Background(), testAgent(t), Text("hi"))
-	if err != nil {
-		t.Fatalf("Run error: %v", err)
 	}
 }
 
@@ -217,7 +209,11 @@ func TestRunMissingTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), testAgent(t), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	_, err = rn.Step()
 	if !errors.Is(err, ErrToolNotFound) {
 		t.Fatalf("error = %v, want ErrToolNotFound", err)
 	}
@@ -240,7 +236,11 @@ func TestRunPolicyDenial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	_, err = rn.Step()
 	var tde *ToolDeniedError
 	if !errors.As(err, &tde) {
 		t.Fatalf("error = %v, want ToolDeniedError", err)
@@ -264,7 +264,11 @@ func TestRunPolicyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	_, err = r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	_, err = rn.Step()
 	if err == nil || err.Error() != "policy service down" {
 		t.Fatalf("error = %v, want policy service down", err)
 	}
@@ -300,10 +304,19 @@ func TestRunHandoffSwitchesAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), source, Text("hi"))
+	rn, err := r.NewRun(context.Background(), source, Text("hi"))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun error: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("Step 1: err=%v status=%v, want nil/StepContinue", err, out.Status)
+	}
+	out, err = rn.Step()
+	if err != nil {
+		t.Fatalf("Step 2 error: %v", err)
+	}
+	result := rn.Result(out.FinalMessage)
 	if result.Text() != "target response" {
 		t.Fatalf("text = %q, want target response", result.Text())
 	}
@@ -329,7 +342,11 @@ func TestRunContextCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = r.Run(ctx, testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(ctx, testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	_, err = rn.Step()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -351,17 +368,25 @@ func TestStreamForwardsModelEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
 	var got []string
-	for event, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	if _, err := rn.StreamStep(func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Errorf("Stream error: %v", stepErr)
+			return false
 		}
-		switch e := event.(type) {
+		switch e := ev.(type) {
 		case model.TextDelta:
 			got = append(got, e.Text)
 		case model.FinalMessage:
 			got = append(got, "final")
 		}
+		return true
+	}); err != nil {
+		t.Fatalf("StreamStep error: %v", err)
 	}
 	if len(got) != 3 {
 		t.Fatalf("got %d events, want 3", len(got))
@@ -396,12 +421,17 @@ func TestStreamToolCallAndResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
 	var toolCalls, toolResults, finals int
-	for event, err := range r.Stream(context.Background(), testAgent(t, echo), Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectEvents := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Errorf("Stream error: %v", stepErr)
+			return false
 		}
-		switch event.(type) {
+		switch ev.(type) {
 		case model.ToolCall:
 			toolCalls++
 		case model.ToolResult:
@@ -409,6 +439,14 @@ func TestStreamToolCallAndResult(t *testing.T) {
 		case model.FinalMessage:
 			finals++
 		}
+		return true
+	}
+	out, err := rn.StreamStep(collectEvents)
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("StreamStep 1: err=%v status=%v, want nil/StepContinue", err, out.Status)
+	}
+	if _, err := rn.StreamStep(collectEvents); err != nil {
+		t.Fatalf("StreamStep 2 error: %v", err)
 	}
 	if toolCalls != 1 {
 		t.Fatalf("tool calls = %d, want 1", toolCalls)
@@ -443,14 +481,27 @@ func TestStreamHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
+	rn, err := r.NewRun(context.Background(), source, Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
 	var handoffs int
-	for event, err := range r.Stream(context.Background(), source, Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectHandoffs := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Errorf("Stream error: %v", stepErr)
+			return false
 		}
-		if _, ok := event.(model.Handoff); ok {
+		if _, ok := ev.(model.Handoff); ok {
 			handoffs++
 		}
+		return true
+	}
+	out, err := rn.StreamStep(collectHandoffs)
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("StreamStep 1: err=%v status=%v", err, out.Status)
+	}
+	if _, err := rn.StreamStep(collectHandoffs); err != nil {
+		t.Fatalf("StreamStep 2 error: %v", err)
 	}
 	if handoffs != 1 {
 		t.Fatalf("handoffs = %d, want 1", handoffs)
@@ -472,13 +523,18 @@ func TestStreamPolicyDenial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, echo), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(ev model.Event, stepErr error) bool { //nolint
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	var tde *ToolDeniedError
 	if !errors.As(gotErr, &tde) {
 		t.Fatalf("error = %v, want ToolDeniedError", gotErr)
@@ -499,39 +555,21 @@ func TestStreamHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	for _, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	if _, err := rn.StreamStep(func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Errorf("Stream error: %v", stepErr)
+			return false
 		}
+		return true
+	}); err != nil {
+		t.Fatalf("StreamStep error: %v", err)
 	}
 	if !before || !after {
 		t.Fatalf("hooks called before=%v after=%v", before, after)
-	}
-}
-
-func TestStreamMaxTurns(t *testing.T) {
-	echo, _ := tool.NewFunc("echo", "Echo text", func(ctx context.Context, in echoInput) (string, error) {
-		return "ok", nil
-	})
-	// Each turn returns a tool call, never final answer
-	m := &streamOnlyModel{
-		repeatTurn: []model.Event{
-			model.TurnMessage{Message: message.Assistant(message.NewToolUse("call_1", "echo", json.RawMessage(`{"text":"x"}`)))},
-		},
-	}
-	r, err := New(m)
-	if err != nil {
-		t.Fatalf("New runner error: %v", err)
-	}
-	var gotErr error
-	for _, err := range r.StreamMax(2, context.Background(), testAgent(t, echo), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
-	}
-	if !errors.Is(gotErr, ErrMaxTurns) {
-		t.Fatalf("error = %v, want ErrMaxTurns", gotErr)
 	}
 }
 
@@ -542,11 +580,15 @@ func TestStreamNilAgent(t *testing.T) {
 		t.Fatalf("New runner error: %v", err)
 	}
 	var gotErr error
-	for _, err := range r.Stream(context.Background(), nil, Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, gotErr := r.NewRun(context.Background(), nil, Text("hi"))
+	if rn != nil {
+		_, gotErr = rn.StreamStep(func(ev model.Event, stepErr error) bool {
+			if stepErr != nil {
+				gotErr = stepErr
+				return false
+			}
+			return true
+		})
 	}
 	if gotErr == nil || gotErr.Error() != "agent is required" {
 		t.Fatalf("error = %v, want agent is required", gotErr)
@@ -560,13 +602,7 @@ func TestStreamRejectsSystemMessageInHistory(t *testing.T) {
 		t.Fatalf("New runner error: %v", err)
 	}
 	history := []message.Message{message.SystemText("should fail")}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t), Messages(history)) {
-		if err != nil {
-			gotErr = err
-			break
-		}
-	}
+	_, gotErr := r.NewRun(context.Background(), testAgent(t), Messages(history))
 	if !errors.Is(gotErr, ErrSystemMessageInHistory) {
 		t.Fatalf("error = %v, want ErrSystemMessageInHistory", gotErr)
 	}
@@ -582,13 +618,18 @@ func TestStreamMissingTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(ev model.Event, stepErr error) bool { //nolint
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if !errors.Is(gotErr, ErrToolNotFound) {
 		t.Fatalf("error = %v, want ErrToolNotFound", gotErr)
 	}
@@ -607,13 +648,18 @@ func TestStreamPolicyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t, echo), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(ev model.Event, stepErr error) bool { //nolint
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if gotErr == nil || gotErr.Error() != "policy service down" {
 		t.Fatalf("error = %v, want policy service down", gotErr)
 	}
@@ -627,13 +673,18 @@ func TestStreamContextCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	var gotErr error
-	for _, err := range r.Stream(ctx, testAgent(t), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(ctx, testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(ev model.Event, stepErr error) bool { //nolint
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if !errors.Is(gotErr, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", gotErr)
 	}
@@ -645,13 +696,18 @@ func TestStreamNoTurnMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(ev model.Event, stepErr error) bool { //nolint
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if !errors.Is(gotErr, ErrStreamContract) {
 		t.Fatalf("error = %v, want ErrStreamContract", gotErr)
 	}
@@ -667,13 +723,18 @@ func TestStreamProviderFinalMessageIsContractError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	var gotErr error
-	for _, err := range r.Stream(context.Background(), testAgent(t), Text("hi")) {
-		if err != nil {
-			gotErr = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
 	}
+	var gotErr error
+	rn.StreamStep(func(ev model.Event, stepErr error) bool { //nolint
+		if stepErr != nil {
+			gotErr = stepErr
+			return false
+		}
+		return true
+	})
 	if !errors.Is(gotErr, ErrStreamContract) {
 		t.Fatalf("error = %v, want ErrStreamContract", gotErr)
 	}
@@ -702,8 +763,16 @@ func TestRunToolHooksFire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t, echo), Text("hi")); err != nil {
-		t.Fatalf("Run error: %v", err)
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	out, err := rn.Step()
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("Step 1: err=%v status=%v", err, out.Status)
+	}
+	if _, err := rn.Step(); err != nil {
+		t.Fatalf("Step 2 error: %v", err)
 	}
 	want := []string{"before:echo", "after:echo:ok"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
@@ -723,8 +792,12 @@ func TestRunOnErrorFires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	if _, err := r.Run(context.Background(), testAgent(t), Text("hi")); err == nil {
-		t.Fatal("Run error = nil, want ErrToolNotFound")
+	rn, err := r.NewRun(context.Background(), testAgent(t), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun error: %v", err)
+	}
+	if _, err := rn.Step(); err == nil {
+		t.Fatal("Step error = nil, want ErrToolNotFound")
 	}
 	if !errors.Is(gotErr, ErrToolNotFound) {
 		t.Fatalf("OnError got %v, want ErrToolNotFound", gotErr)
@@ -745,12 +818,20 @@ func TestRunEmptyHooksStructSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	result, err := r.Run(context.Background(), testAgent(t, echo), Text("hi"))
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
 	if err != nil {
-		t.Fatalf("Run error: %v", err)
+		t.Fatalf("NewRun error: %v", err)
 	}
-	if result.Text() != "done" {
-		t.Fatalf("result = %q, want done", result.Text())
+	out, err := rn.Step()
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("Step 1: err=%v status=%v", err, out.Status)
+	}
+	out, err = rn.Step()
+	if err != nil {
+		t.Fatalf("Step 2 error: %v", err)
+	}
+	if out.FinalMessage.Text() != "done" {
+		t.Fatalf("result = %q, want done", out.FinalMessage.Text())
 	}
 }
 

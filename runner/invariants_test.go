@@ -8,6 +8,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
@@ -80,7 +81,31 @@ func runScript(t *testing.T, s propScript, conc int) runOutcome {
 	if err != nil {
 		t.Fatalf("New runner error: %v", err)
 	}
-	res, runErr := r.RunMax(s.maxTurns, context.Background(), a, Text("hi"))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"))
+	if err != nil {
+		return runOutcome{err: err, onError: ch.onError.Load()}
+	}
+	var res *Result
+	var runErr error
+	for i := 0; i < s.maxTurns; i++ {
+		out, err := rn.Step()
+		if err != nil {
+			runErr = err
+			break
+		}
+		if out.Status == StepCompleted {
+			res = rn.Result(out.FinalMessage)
+			break
+		}
+		if out.Status == StepSuspended {
+			res = rn.SuspendedResult(out.PendingCalls)
+			break
+		}
+	}
+	if runErr == nil && res == nil {
+		runErr = fmt.Errorf("%w: %d", ErrMaxTurns, s.maxTurns)
+		r.FireOnError(rn.Context(), runErr)
+	}
 	return runOutcome{res: res, err: runErr, events: log.snapshot(), onError: ch.onError.Load()}
 }
 
@@ -182,7 +207,11 @@ func TestInvariantHandoffLastWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	res, err := r.Run(context.Background(), a, Text("go"))
+	rn, err := r.NewRun(context.Background(), a, Text("go"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	res, err := runSteps(rn)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -207,7 +236,19 @@ func TestInvariantCtxCancelNoEffects(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	res, runErr := r.Run(ctx, a, Text("hi"))
+	rn, err := r.NewRun(ctx, a, Text("hi"))
+	var res *Result
+	var runErr error
+	if err != nil {
+		runErr = err
+	} else {
+		out, stepErr := rn.Step()
+		if stepErr != nil {
+			runErr = stepErr
+		} else if out.Status == StepCompleted {
+			res = rn.Result(out.FinalMessage)
+		}
+	}
 	if res != nil || !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("I9: expected context.Canceled, got res=%v err=%v", res, runErr)
 	}
@@ -235,7 +276,7 @@ type streamOutcome struct {
 	resultBeforeCall bool
 }
 
-// streamScript drives Runner.Stream and collects ordered event statistics.
+// streamScript drives the Runner via StreamStep and collects ordered event statistics.
 func streamScript(t *testing.T, s propScript, conc int) streamOutcome {
 	t.Helper()
 	log := &eventLog{}
@@ -254,9 +295,9 @@ func streamScript(t *testing.T, s propScript, conc int) streamOutcome {
 	}
 	out := streamOutcome{}
 	openCalls := map[string]bool{}
-	for ev, err := range r.StreamMax(s.maxTurns, context.Background(), a, Text("hi")) {
-		if err != nil {
-			out.termErr = err
+	processEvent := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			out.termErr = stepErr
 		}
 		switch e := ev.(type) {
 		case model.FinalMessage:
@@ -272,6 +313,32 @@ func streamScript(t *testing.T, s propScript, conc int) streamOutcome {
 				out.resultBeforeCall = true
 			}
 		}
+		return true
+	}
+
+	rn, err := r.NewRun(context.Background(), a, Text("hi"))
+	if err != nil {
+		r.FireOnError(context.Background(), err)
+		processEvent(model.StreamError{Err: err}, err)
+		out.onError = ch.onError.Load()
+		return out
+	}
+	hitLimit := true
+	for i := 0; i < s.maxTurns; i++ {
+		stepOut, stepErr := rn.StreamStep(processEvent)
+		if stepErr != nil {
+			hitLimit = false
+			break
+		}
+		if stepOut.Status != StepContinue {
+			hitLimit = false
+			break
+		}
+	}
+	if hitLimit {
+		maxErr := fmt.Errorf("%w: %d", ErrMaxTurns, s.maxTurns)
+		r.FireOnError(rn.Context(), maxErr)
+		processEvent(model.StreamError{Err: maxErr}, maxErr)
 	}
 	out.onError = ch.onError.Load()
 	return out

@@ -43,7 +43,8 @@ func TestResumeApprovedRejectsInputMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}}); !errors.Is(err, ErrInvalidApproval) {
+	_, err = r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
+	if !errors.Is(err, ErrInvalidApproval) {
 		t.Fatalf("err = %v, want ErrInvalidApproval", err)
 	}
 	if ran != 0 {
@@ -60,7 +61,8 @@ func TestResumeApprovedRejectsNameMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}}); !errors.Is(err, ErrInvalidApproval) {
+	_, err = r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
+	if !errors.Is(err, ErrInvalidApproval) {
 		t.Fatalf("err = %v, want ErrInvalidApproval", err)
 	}
 	if ran != 0 {
@@ -79,10 +81,15 @@ func TestResumeApprovedAcceptsMatchingSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := r.ResumeApproved(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
+	rn, err := r.NewResumeRun(context.Background(), a, sr, []Approval{{CallID: "call_1", Approved: true}})
 	if err != nil {
-		t.Fatalf("ResumeApproved: %v", err)
+		t.Fatalf("NewResumeRun: %v", err)
 	}
+	out, err := rn.Step()
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	res := rn.Result(out.FinalMessage)
 	if ran != 1 {
 		t.Fatalf("tool ran %d times, want 1", ran)
 	}

@@ -91,7 +91,11 @@ func TestHandoffBatchAttributionEquivalence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		res, err := r.Run(context.Background(), a, Text("hi"))
+		rn, err := r.NewRun(context.Background(), a, Text("hi"))
+		if err != nil {
+			t.Fatalf("[conc=%d] NewRun: %v", conc, err)
+		}
+		res, err := runSteps(rn)
 		if err != nil {
 			t.Fatalf("[conc=%d] Run: %v", conc, err)
 		}
@@ -206,7 +210,11 @@ func runBatchErr(t *testing.T, m model.Model, a *agent.Agent, conc int) error {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, runErr := r.Run(context.Background(), a, Text("hi"))
+	rn, err := r.NewRun(context.Background(), a, Text("hi"))
+	if err != nil {
+		return err
+	}
+	_, runErr := rn.Step()
 	return runErr
 }
 
@@ -279,7 +287,10 @@ func TestParallelExternalCancelOutranks(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { cancel() }()
-	_, runErr := r.Run(ctx, a, Text("hi"))
+	rn, runErr := r.NewRun(ctx, a, Text("hi"))
+	if runErr == nil {
+		_, runErr = rn.Step()
+	}
 	if !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", runErr)
 	}
@@ -306,9 +317,9 @@ func TestStreamEmitsTurnMessagePerTurnAndOneFinal(t *testing.T) {
 
 	var turnMsgs []message.Message
 	var finals []message.Message
-	for ev, err := range r.Stream(context.Background(), testAgent(t, echo), Text("hi")) {
-		if err != nil {
-			t.Fatalf("Stream error: %v", err)
+	collectEvents := func(ev model.Event, stepErr error) bool {
+		if stepErr != nil {
+			t.Fatalf("Stream error: %v", stepErr)
 		}
 		switch e := ev.(type) {
 		case model.TurnMessage:
@@ -316,6 +327,18 @@ func TestStreamEmitsTurnMessagePerTurnAndOneFinal(t *testing.T) {
 		case model.FinalMessage:
 			finals = append(finals, e.Message)
 		}
+		return true
+	}
+	rn, err := r.NewRun(context.Background(), testAgent(t, echo), Text("hi"))
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	out, err := rn.StreamStep(collectEvents)
+	if err != nil || out.Status != StepContinue {
+		t.Fatalf("StreamStep 1: err=%v status=%v", err, out.Status)
+	}
+	if _, err := rn.StreamStep(collectEvents); err != nil {
+		t.Fatalf("StreamStep 2: %v", err)
 	}
 
 	if len(turnMsgs) != 2 {
@@ -345,14 +368,18 @@ func streamContractErr(t *testing.T, events []model.Event) error {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	var last error
-	for ev, err := range r.Stream(context.Background(), buildSimpleAgent(t, "A"), Text("hi")) {
-		_ = ev
-		if err != nil {
-			last = err
-			break
-		}
+	rn, err := r.NewRun(context.Background(), buildSimpleAgent(t, "A"), Text("hi"))
+	if err != nil {
+		return err
 	}
+	var last error
+	rn.StreamStep(func(_ model.Event, stepErr error) bool {
+		if stepErr != nil {
+			last = stepErr
+			return false
+		}
+		return true
+	})
 	return last
 }
 
