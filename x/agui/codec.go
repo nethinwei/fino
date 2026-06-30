@@ -146,6 +146,9 @@ func (m *Mapper) mapTurnMessage(msg message.Message) ([]Event, error) {
 	// thinking blocks the provider already surfaced, so an absent block yields no
 	// reasoning events and no hidden chain-of-thought is invented.
 	events = append(events, m.reasoningEvents(msg)...)
+	// Multimodal output blocks (image/audio/video/file) have no standard AG-UI
+	// event; surface each as a CUSTOM event so clients can render them.
+	events = append(events, m.multimodalEvents(msg)...)
 	parentMessageID := m.textMessageID
 	if m.textMessageID != "" {
 		fullText := msg.Text()
@@ -225,10 +228,37 @@ func (m *Mapper) reasoningEvents(msg message.Message) []Event {
 	})
 }
 
+// multimodalEvents maps each multimodal block of an assistant turn into a
+// CUSTOM event named "multimodal_block" carrying the block as its value. AG-UI
+// defines no standard image/audio event, so this is the protocol escape hatch.
+func (m *Mapper) multimodalEvents(msg message.Message) []Event {
+	var events []Event
+	for _, b := range msg.Content {
+		if !isMultimodalBlock(b) {
+			continue
+		}
+		events = append(events, CustomEvent{
+			BaseEvent: BaseEvent{Type: EventCustom},
+			Name:      "multimodal_block",
+			Value:     b,
+		})
+	}
+	return events
+}
+
+func isMultimodalBlock(b message.Block) bool {
+	switch b.Type {
+	case message.TypeImage, message.TypeAudio, message.TypeVideo, message.TypeFile:
+		return true
+	}
+	return false
+}
+
 func validateAssistantBlocks(blocks []message.Block) error {
 	for _, block := range blocks {
 		switch block.Type {
-		case message.TypeText, message.TypeToolUse, message.TypeThinking:
+		case message.TypeText, message.TypeToolUse, message.TypeThinking,
+			message.TypeImage, message.TypeAudio, message.TypeVideo, message.TypeFile:
 		default:
 			return fmt.Errorf("%w: unsupported assistant block type %q", ErrInvalidTurnMessage, block.Type)
 		}

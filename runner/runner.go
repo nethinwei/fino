@@ -83,6 +83,11 @@ type Runner struct {
 	maxConcurrency int
 }
 
+// Model returns the underlying model the runner drives. It exposes the
+// configured model so adapters (such as x/agui) can perform capability
+// discovery via the optional model.Capabilities interface.
+func (r *Runner) Model() model.Model { return r.model }
+
 // Option configures a Runner.
 type Option func(*Runner)
 

@@ -281,11 +281,12 @@ func convertMessages(msgs []Message) ([]message.Message, error) {
 func convertSingleMessage(m Message) (*message.Message, error) {
 	switch m.Role {
 	case RoleUser:
-		if text := contentString(m.Content); text != "" {
-			msg := message.UserText(text)
-			return &msg, nil
+		blocks := contentBlocks(m.Content)
+		if len(blocks) == 0 {
+			return nil, nil
 		}
-		return nil, nil
+		msg := message.Message{Role: message.RoleUser, Content: blocks}
+		return &msg, nil
 	case RoleAssistant:
 		return convertAssistant(m)
 	default:
@@ -334,4 +335,86 @@ func convertToolResult(m Message) (message.Block, error) {
 func contentString(content any) string {
 	s, _ := content.(string)
 	return s
+}
+
+// contentBlocks extracts fino blocks from an AG-UI message Content field. A
+// string yields a single text block; an array yields one block per OpenAI-style
+// content part (text, image_url, input_audio). Unsupported parts are skipped.
+func contentBlocks(content any) []message.Block {
+	switch v := content.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []message.Block{message.NewText(v)}
+	case []any:
+		var blocks []message.Block
+		for _, part := range v {
+			if b, ok := aguiPartToBlock(part); ok {
+				blocks = append(blocks, b)
+			}
+		}
+		return blocks
+	}
+	return nil
+}
+
+// aguiPartToBlock converts one OpenAI-style content part (decoded from JSON as
+// a map[string]any) into a fino block.
+func aguiPartToBlock(part any) (message.Block, bool) {
+	m, ok := part.(map[string]any)
+	if !ok {
+		return message.Block{}, false
+	}
+	switch m["type"] {
+	case "text":
+		s, _ := m["text"].(string)
+		return message.NewText(s), true
+	case "image_url":
+		img, _ := m["image_url"].(map[string]any)
+		url, _ := img["url"].(string)
+		if mediaType, data, ok := parseDataURL(url); ok {
+			return message.NewImage(mediaType, message.WithBase64(data)), true
+		}
+		return message.NewImage("image/png", message.WithURL(url)), true
+	case "input_audio":
+		ia, _ := m["input_audio"].(map[string]any)
+		data, _ := ia["data"].(string)
+		format, _ := ia["format"].(string)
+		mediaType := "audio/" + format
+		if format == "" {
+			mediaType = "audio/wav"
+		}
+		return message.NewAudio(mediaType, message.WithBase64(data)), true
+	}
+	return message.Block{}, false
+}
+
+// parseDataURL splits "data:image/png;base64,AAA" into media type and data.
+func parseDataURL(s string) (mediaType, data string, ok bool) {
+	const prefix = "data:"
+	if len(s) <= len(prefix) || s[:len(prefix)] != prefix {
+		return "", "", false
+	}
+	rest := s[len(prefix):]
+	comma := indexOfByte(rest, ',')
+	if comma < 0 {
+		return "", "", false
+	}
+	head := rest[:comma]
+	data = rest[comma+1:]
+	mediaType = head
+	if i := indexOfByte(mediaType, ';'); i >= 0 {
+		mediaType = mediaType[:i]
+	}
+	return mediaType, data, true
+}
+
+func indexOfByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }
