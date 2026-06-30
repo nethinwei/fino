@@ -65,3 +65,88 @@ func TestToolResultsMessageBatchesBlocks(t *testing.T) {
 		t.Fatalf("first result content = %#v", msg.Content[0].Content)
 	}
 }
+
+func TestMultimodalBlockJSON(t *testing.T) {
+	modalities := []struct {
+		name      string
+		construct func(string, ...MediaOption) Block
+		wantType  string
+	}{
+		{"image", NewImage, `"type":"image"`},
+		{"audio", NewAudio, `"type":"audio"`},
+		{"video", NewVideo, `"type":"video"`},
+		{"file", NewFile, `"type":"file"`},
+	}
+	sources := []struct {
+		name     string
+		opt      MediaOption
+		contains []string
+	}{
+		{"base64", WithBase64("AAA="), []string{`"source_type":"base64"`, `"data":"AAA="`}},
+		{"url", WithURL("https://x/y.png"), []string{`"source_type":"url"`, `"url":"https://x/y.png"`}},
+		{"file_id", WithFileID("file_1"), []string{`"source_type":"file_id"`, `"file_id":"file_1"`}},
+	}
+	for _, m := range modalities {
+		for _, s := range sources {
+			t.Run(m.name+"_"+s.name, func(t *testing.T) {
+				b := m.construct("image/png", s.opt)
+				data, err := json.Marshal(b)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				got := string(data)
+				wants := append([]string{m.wantType, `"media_type":"image/png"`}, s.contains...)
+				for _, want := range wants {
+					if !strings.Contains(got, want) {
+						t.Fatalf("json %q missing %q", got, want)
+					}
+				}
+				// 扁平 discriminated union：禁止嵌套 source 子对象。
+				if strings.Contains(got, `"source":{`) {
+					t.Fatalf("nested source object is not allowed: %s", got)
+				}
+			})
+		}
+	}
+}
+
+func TestMultimodalBlockOmitempty(t *testing.T) {
+	b := NewImage("image/png", WithBase64("AAA="))
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(data)
+	for _, unwanted := range []string{`"url":`, `"file_id":`} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("base64 source should omit %s: %s", unwanted, got)
+		}
+	}
+}
+
+func TestMultimodalBlockRoundtrip(t *testing.T) {
+	orig := NewAudio("audio/wav", WithURL("https://x/a.wav"))
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Block
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Type != TypeAudio || back.SourceType != SourceURL ||
+		back.URL != "https://x/a.wav" || back.MediaType != "audio/wav" {
+		t.Fatalf("roundtrip mismatch: %#v", back)
+	}
+}
+
+func TestImageDetailOption(t *testing.T) {
+	b := NewImage("image/png", WithURL("https://x/y.png"), WithDetail("high"))
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"detail":"high"`) {
+		t.Fatalf("missing detail: %s", data)
+	}
+}
