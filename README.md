@@ -111,7 +111,7 @@ DEEPSEEK_API_KEY=sk-... go run .
 Seven single-purpose packages:
 
 ```text
-message/  roles, messages, content blocks (text / tool_use / tool_result / thinking)
+message/  roles, messages, content blocks (text / tool_use / tool_result / thinking / image / audio / video / file)
 tool/     Tool interface, function-tool helper, JSON Schema inference
 model/    Model interface (Generate + Stream), stream event types
 agent/    Agent, Mode (instructions + tools), handoff tool helper

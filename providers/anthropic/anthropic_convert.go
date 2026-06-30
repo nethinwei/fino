@@ -51,10 +51,15 @@ func toolResultBlocks(msg message.Message) []reqBlock {
 
 // toolResultContent marshals a tool_result's nested blocks to Anthropic's
 // content field: a plain JSON string when only text is present, or an array of
-// blocks when multimodal content is present.
+// blocks when multimodal content is present. An empty text result returns nil
+// so the field is omitted via omitempty, matching the pre-multimodal behavior.
 func toolResultContent(blocks []message.Block) json.RawMessage {
 	if onlyText(blocks) {
-		return json.RawMessage(strconv.Quote(blocksText(blocks)))
+		s := blocksText(blocks)
+		if s == "" {
+			return nil
+		}
+		return json.RawMessage(strconv.Quote(s))
 	}
 	parts := make([]reqBlock, 0, len(blocks))
 	for _, b := range blocks {

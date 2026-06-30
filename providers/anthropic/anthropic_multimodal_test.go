@@ -157,6 +157,18 @@ func TestModelCapabilities(t *testing.T) {
 	}
 }
 
+func TestEmptyToolResultContentOmitted(t *testing.T) {
+	msg := message.ToolResults(message.NewToolResult("c1", "echo", nil, false))
+	_, out := toAnthropicMessages([]message.Message{msg})
+	if len(out) != 1 || len(out[0].Content) != 1 {
+		t.Fatalf("out = %+v", out)
+	}
+	// Empty text content must yield nil (omitted via omitempty), not "content":"".
+	if len(out[0].Content[0].Content) != 0 {
+		t.Fatalf("empty content should be omitted, got: %s", out[0].Content[0].Content)
+	}
+}
+
 func hasModality(list []message.BlockType, want message.BlockType) bool {
 	for _, b := range list {
 		if b == want {

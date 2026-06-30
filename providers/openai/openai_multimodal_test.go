@@ -203,3 +203,25 @@ func TestModelCapabilities(t *testing.T) {
 		t.Fatalf("input modalities missing image: %+v", info.InputModalities)
 	}
 }
+
+func TestEmptyContentOmitted(t *testing.T) {
+	if raw := textContent(""); raw != nil {
+		t.Fatalf("textContent(\"\") = %s, want nil", raw)
+	}
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+	m, _ := New("gpt-4o", WithBaseURL(srv.URL), WithAPIKey("k"))
+	// A tool result with no content blocks must omit the content field, not emit
+	// "content":"" (regression guard for the RawMessage + omitempty change).
+	msg := message.ToolResults(message.NewToolResult("c1", "echo", nil, false))
+	if _, err := m.Generate(context.Background(), []message.Message{msg}, nil); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.Contains(string(body), `"content"`) {
+		t.Fatalf("empty content should be omitted, got: %s", body)
+	}
+}

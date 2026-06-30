@@ -89,8 +89,12 @@ func buildContent(blocks []message.Block) json.RawMessage {
 }
 
 // textContent quotes a string into a JSON RawMessage suitable for the content
-// field.
+// field. It returns nil for an empty string so the field is omitted via
+// omitempty, preserving the pre-multimodal behavior of omitting empty content.
 func textContent(s string) json.RawMessage {
+	if s == "" {
+		return nil
+	}
 	return json.RawMessage(strconv.Quote(s))
 }
 

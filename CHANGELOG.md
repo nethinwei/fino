@@ -23,6 +23,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Capabilities()` to report its input/output modalities, input sources, and
   prompt-cache/streaming support. Callers assert `m.(model.Capabilities)` and
   degrade to text-only when absent. The info is provider-wide and static.
+- **`runner.Runner.Model()` accessor.** Exposes the configured model so
+  adapters (such as `x/agui`) can perform capability discovery. The Runner still
+  holds only configuration; this is a read-only accessor, not new state.
 - **Anthropic multimodal input and output.** User, assistant, and tool_result
   content folds fino blocks into Anthropic's nested `source` object; tool_result
   content stays a JSON string for text-only results and becomes a block array
