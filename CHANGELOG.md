@@ -23,8 +23,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Capabilities()` to report its input/output modalities, input sources, and
   prompt-cache/streaming support. Callers assert `m.(model.Capabilities)` and
   degrade to text-only when absent. The info is provider-wide and static.
-- **`runner.Runner.Model()` accessor.** Exposes the configured model so
-  adapters (such as `x/agui`) can perform capability discovery. The Runner still
+- **`runner.Runner.Capabilities()` accessor.** Reports the configured model's
+  capabilities (when it implements `model.Capabilities`) as pure data, so
+  adapters (such as `x/agui`) can do capability discovery without reaching the
+  `Model` interface — they cannot bypass the Runner's authorization, hooks, and
+  invariant protection by calling `Generate`/`Stream` directly. The Runner still
   holds only configuration; this is a read-only accessor, not new state.
 - **Anthropic multimodal input and output.** User, assistant, and tool_result
   content folds fino blocks into Anthropic's nested `source` object; tool_result
@@ -64,6 +67,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text placeholder. `model.Capabilities` reflects the provider-wide default.
 - OpenAI tool-result content accepts only a string, so multimodal tool results
   degrade to a text placeholder on the OpenAI path (Anthropic is lossless).
+- Model-generated audio arrives as incremental base64 deltas over the wire;
+  fino accumulates them and emits a single complete `audio` block in the
+  `TurnMessage` snapshot rather than per-fragment stream events. Streaming
+  consumers should read multimodal output from `TurnMessage`, not from
+  `ContentBlockDelta`.
 
 ## [0.9.1] - 2026-07-01
 

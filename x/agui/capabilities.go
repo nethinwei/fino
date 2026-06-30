@@ -1,9 +1,6 @@
 package agui
 
-import (
-	"github.com/nethinwei/fino/message"
-	"github.com/nethinwei/fino/model"
-)
+import "github.com/nethinwei/fino/message"
 
 // Capabilities describes which AG-UI protocol features the configured Runtime
 // can actually execute. A client should gate UI features on these flags rather
@@ -39,8 +36,7 @@ func (rt *Runtime) Capabilities() Capabilities {
 			caps.Tools = append(caps.Tools, t.Info().Name)
 		}
 	}
-	if mc, ok := rt.l.Runner().Model().(model.Capabilities); ok {
-		info := mc.Capabilities()
+	if info, ok := rt.l.Runner().Capabilities(); ok {
 		caps.InputModalities = toStrings(info.InputModalities)
 		caps.OutputModalities = toStrings(info.OutputModalities)
 	}
