@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: `runner.NewRun` rejects a dangling tool_use tail when the resume
+  seam is off.** A history whose last message is an assistant tool_use with no
+  following tool_result is not a safe boundary (loop-semantics I10): most
+  providers (notably Anthropic) return 400 on it. `prepareRun` now rejects it up
+  front with `ErrPendingToolUseInHistory` instead of forwarding the ill-formed
+  request. Enable `WithResumeFromPendingTools` to execute the pending batch
+  before the first model turn, or capture the snapshot at a completed turn
+  boundary. `NewResumeRun` is unaffected (its suspended snapshot legitimately
+  ends in a dangling tool_use).
+
 ## [0.9.1] - 2026-06-30
 
 ### Changed

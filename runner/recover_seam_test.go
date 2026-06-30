@@ -15,45 +15,39 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/nethinwei/fino/message"
 	"github.com/nethinwei/fino/model"
 )
 
-func TestResumeSeamProbe_DanglingToolUseNotAutoExecuted(t *testing.T) {
+func TestResumeSeamProbe_DanglingToolUseRejectedWithoutSeam(t *testing.T) {
 	history := []message.Message{
 		message.UserText("hi"),
 		message.Assistant(message.NewToolUse("c1", "alpha", json.RawMessage(`{}`))),
 	}
 	log := &eventLog{}
 	a := buildPropAgent(t, log)
-	m := &propModel{turns: []scriptTurn{{}}} // next response is a final text turn
+	m := &propModel{turns: []scriptTurn{{}}} // would be a final text turn, but never reached
 
 	r, err := New(m)
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
-	rn, err := r.NewRun(context.Background(), a, Messages(history))
-	if err != nil {
-		t.Fatalf("NewRun: %v", err)
+	// Without the resume seam, a dangling tool_use tail is not a safe boundary
+	// (I10): the core rejects it up front rather than forwarding an ill-formed
+	// history to the model. The seam (WithResumeFromPendingTools) is the only
+	// way to execute the pending batch.
+	_, err = r.NewRun(context.Background(), a, Messages(history))
+	if !errors.Is(err, ErrPendingToolUseInHistory) {
+		t.Fatalf("error = %v, want ErrPendingToolUseInHistory", err)
 	}
-	out, err := rn.Step()
-	if err != nil {
-		t.Fatalf("Step error: %v", err)
-	}
-	res := rn.Result(out.FinalMessage)
-
-	// The pending tool_use is NOT auto-executed: the Runner called the model
-	// instead. This is the default behavior documented in §7.2.
-	if m.i == 0 {
-		t.Fatal("expected the model to be called; pending tools are not auto-executed (seam gap absent?)")
+	if m.i != 0 {
+		t.Fatal("model should not be called; the history is rejected before any model turn")
 	}
 	if containsEvent(log.snapshot(), "run:alpha") {
 		t.Fatal("pending tool executed without a resume seam; core behavior changed unexpectedly")
-	}
-	if res == nil {
-		t.Fatal("expected a result from re-running over the history")
 	}
 }
 

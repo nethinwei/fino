@@ -26,6 +26,14 @@ var (
 	// ErrSystemMessageInHistory indicates the run input contained a system
 	// message; the Runner injects system instructions from the mode instead.
 	ErrSystemMessageInHistory = errors.New("system message in history")
+	// ErrPendingToolUseInHistory indicates the run input ended in a dangling
+	// assistant tool_use (no following tool_result) while the resume-from-pending
+	// seam was not enabled. Such a history is not a safe boundary
+	// (loop-semantics I10): most providers reject it, and the core refuses to
+	// forward it. Enable WithResumeFromPendingTools to execute the pending batch
+	// before the first model turn, or capture the snapshot at a completed turn
+	// boundary instead.
+	ErrPendingToolUseInHistory = errors.New("pending tool_use in history without resume seam")
 	// ErrToolDenied is the sentinel wrapped by ToolDeniedError when a Policy denies a tool call.
 	ErrToolDenied = errors.New("tool denied")
 	// ErrStreamContract indicates a model.Model.Stream implementation violated
@@ -201,8 +209,13 @@ func WithModelOptions(opts ...model.Option) RunOption {
 // ability to continue a run that was interrupted after the model requested tools
 // but before they ran (e.g. while awaiting human approval), without introducing
 // any checkpoint, session, or graph concept. When the seam is off (the default)
-// or the tail has no pending tool_use, it is a no-op and the run starts at the
-// model as usual.
+// and the tail carries a pending tool_use, prepareRun rejects the input with
+// ErrPendingToolUseInHistory; when the tail has no pending tool_use it is a
+// no-op and the run starts at the model as usual.
+//
+// The resumed tail batch runs before the turn loop, so it does not count
+// against any turn limit an outer loop enforces — only subsequent model
+// turns do.
 func WithResumeFromPendingTools() RunOption {
 	return func(c *runConfig) { c.resumePending = true }
 }
@@ -284,6 +297,14 @@ func (r *Runner) prepareRun(a *agent.Agent, input Input, opts []RunOption) (*run
 		if opt != nil {
 			opt(&cfg)
 		}
+	}
+	// A history whose tail is a dangling assistant tool_use is not a safe
+	// boundary (I10): most providers reject it, and without the resume seam the
+	// core has no way to execute the pending batch first. Reject it up front
+	// rather than forwarding an ill-formed request. The seam (checked above via
+	// cfg.resumePending, which an option may have just enabled) opts back in.
+	if !cfg.resumePending && len(pendingToolUses(input.messages)) > 0 {
+		return nil, ErrPendingToolUseInHistory
 	}
 	mode, ok := a.Mode(cfg.modeName)
 	if !ok {

@@ -558,6 +558,7 @@ Runner 暴露可判别错误类型，方便用户用 `errors.Is` 或 `errors.As`
 - `ErrMaxTurns`
 - `ErrToolNotFound`
 - `ErrSystemMessageInHistory`
+- `ErrPendingToolUseInHistory`（history 尾为 dangling `tool_use` 且未启用 `WithResumeFromPendingTools`；多数 provider 会拒绝该 history，核心在 `prepareRun` 即拒绝）
 - `ErrToolDenied`（sentinel，由 `ToolDeniedError.Unwrap` 暴露）
 - `ErrStreamContract`（仅 Stream：`model.Stream` 违反 `TurnMessage`/`FinalMessage` 事件契约）
 - `ErrInvalidToolCallID` / `ErrDuplicateToolCallID`（tool_use ID 为空或批内重复，在授权/执行前 fail-fast）
@@ -817,7 +818,7 @@ type ReplayModel struct{ Log *Log } // 不调用任何真实 provider
 
 - 依赖接缝：当前不变量“安全边界恢复完备”。
 - 实现：在安全边界（history 末尾为 tool 结果、user 消息或无 pending tool_use 的 assistant 文本）上序列化 `(history, mode)`；恢复即用同一段 history 继续运行。`x/recover` 的 `Snapshot` 因此只有 `History` 与 `Mode` 两个字段。
-- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的恢复有两条路径：**盲恢复**用唯一最小接缝 `runner.WithResumeFromPendingTools()`（默认关闭，opt-in 时在首个模型 turn 前无条件执行 history 末尾的 pending tools），`x/recover` 的 `Snapshot.ResumePending` 透传它，适用于崩溃恢复；**人工审批恢复**用一等 API `react.Loop.ResumeApproved`（逐调用批准/拒绝），它工作在 `SuspendedRun` 快照而非 `Snapshot` 上，`x/recover` 不参与。两者并存、互不内嵌。见 `docs/spec/loop-semantics.md` §7.2/§7.3。
+- 边界：只持久化这两样，不引入图状态 checkpoint（遵守“人工确认和恢复”一节）。批次中途（dangling `tool_use`）的恢复有两条路径：**盲恢复**用唯一最小接缝 `runner.WithResumeFromPendingTools()`（默认关闭：关闭时 history 尾为 dangling `tool_use` 会被 `ErrPendingToolUseInHistory` 拒绝；opt-in 时在首个模型 turn 前无条件执行 history 末尾的 pending tools），`x/recover` 的 `Snapshot.ResumePending` 透传它，适用于崩溃恢复；**人工审批恢复**用一等 API `react.Loop.ResumeApproved`（逐调用批准/拒绝），它工作在 `SuspendedRun` 快照而非 `Snapshot` 上，`x/recover` 不参与。两者并存、互不内嵌。见 `docs/spec/loop-semantics.md` §7.2/§7.3。
 - 证明：崩溃恢复、长时运行无需核心新增中断子系统。
 
 ### 可观测性（tracing / metrics）

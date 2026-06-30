@@ -172,6 +172,29 @@ func TestRunRejectsSystemMessageInHistory(t *testing.T) {
 	}
 }
 
+// TestRunRejectsDanglingToolUseWithoutResumeSeam pins the input-history guard:
+// when WithResumeFromPendingTools is NOT set, a history whose tail is a dangling
+// assistant tool_use (no following tool_result) is rejected up front. Such a
+// history is not a safe boundary (loop-semantics I10), and most providers
+// (notably Anthropic) would 400 on it; the core rejects it with a clear,
+// provider-agnostic error rather than letting the request fail downstream. The
+// seam-enabled path is covered by recover_seam_test.go.
+func TestRunRejectsDanglingToolUseWithoutResumeSeam(t *testing.T) {
+	m := &scriptedModel{responses: []message.Message{message.Assistant(message.NewText("ok"))}}
+	r, err := New(m)
+	if err != nil {
+		t.Fatalf("New runner error: %v", err)
+	}
+	history := []message.Message{
+		message.UserText("hi"),
+		message.Assistant(message.NewToolUse("call_1", "fetch", json.RawMessage(`{"text":"a"}`))),
+	}
+	_, err = r.NewRun(context.Background(), testAgent(t), Messages(history))
+	if !errors.Is(err, ErrPendingToolUseInHistory) {
+		t.Fatalf("error = %v, want ErrPendingToolUseInHistory", err)
+	}
+}
+
 func TestRunMergesModelOptions(t *testing.T) {
 	mode, err := agent.NewMode("default", "be useful", agent.WithModelOptions(model.WithTemperature(0)))
 	if err != nil {
