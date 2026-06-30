@@ -176,10 +176,10 @@ func WithExtraBody(field string, value any) model.Option {
 }
 
 type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	ToolCalls  []chatToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
 }
 
 type chatToolCall struct {
@@ -200,12 +200,41 @@ type chatTool struct {
 	} `json:"function"`
 }
 
+// openaiContentPart is one element of a multimodal content array. OpenAI
+// accepts a string for text-only content and an array for multimodal content.
+type openaiContentPart struct {
+	Type       string            `json:"type"`
+	Text       string            `json:"text,omitempty"`
+	ImageURL   *openaiImageURL   `json:"image_url,omitempty"`
+	InputAudio *openaiInputAudio `json:"input_audio,omitempty"`
+}
+
+type openaiImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type openaiInputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
+}
+
+// respAudio carries a model-generated audio payload (GPT-4o audio output).
+type respAudio struct {
+	ID         string `json:"id"`
+	Data       string `json:"data"`
+	Transcript string `json:"transcript"`
+	Format     string `json:"format"`
+	ExpiresAt  int64  `json:"expires_at"`
+}
+
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content          string         `json:"content"`
-			ReasoningContent string         `json:"reasoning_content"`
-			ToolCalls        []chatToolCall `json:"tool_calls"`
+			Content          json.RawMessage `json:"content"`
+			ReasoningContent string          `json:"reasoning_content"`
+			ToolCalls        []chatToolCall  `json:"tool_calls"`
+			Audio            *respAudio      `json:"audio"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -304,12 +333,27 @@ func (m *Model) Generate(ctx context.Context, messages []message.Message, tools 
 	if choice.ReasoningContent != "" {
 		blocks = append(blocks, message.NewThinking(choice.ReasoningContent))
 	}
-	if choice.Content != "" {
-		blocks = append(blocks, message.NewText(choice.Content))
+	blocks = append(blocks, respContentToBlocks(choice.Content)...)
+	if choice.Audio != nil {
+		blocks = append(blocks, audioRespToBlock(choice.Audio))
 	}
 	for _, tc := range choice.ToolCalls {
 		blocks = append(blocks, message.NewToolUse(tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments)))
 	}
 	msg := message.Assistant(blocks...)
 	return &msg, nil
+}
+
+// Capabilities reports the modalities and sources this adapter supports. The
+// Chat Completions API accepts image and audio input (base64/url) and can
+// produce text and audio output. Video and file inputs have no standard
+// content part and degrade to text. Values are provider-wide defaults.
+func (m *Model) Capabilities() model.CapabilitiesInfo {
+	return model.CapabilitiesInfo{
+		InputModalities:     []message.BlockType{message.TypeText, message.TypeImage, message.TypeAudio},
+		InputSources:        []message.SourceType{message.SourceBase64, message.SourceURL},
+		OutputModalities:    []message.BlockType{message.TypeText, message.TypeAudio},
+		SupportsPromptCache: true,
+		SupportsStreaming:   true,
+	}
 }

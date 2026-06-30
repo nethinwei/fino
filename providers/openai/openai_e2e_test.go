@@ -120,7 +120,7 @@ func TestToOpenAIMessagesToolRoundtrip(t *testing.T) {
 	if out[1].Role != "assistant" || len(out[1].ToolCalls) != 1 || out[1].ToolCalls[0].ID != "call_1" {
 		t.Fatalf("assistant message = %+v", out[1])
 	}
-	if out[2].Role != "tool" || out[2].ToolCallID != "call_1" || out[2].Content != "sunny" {
+	if out[2].Role != "tool" || out[2].ToolCallID != "call_1" || string(out[2].Content) != `"sunny"` {
 		t.Fatalf("tool message = %+v", out[2])
 	}
 }
@@ -193,7 +193,7 @@ func TestRunnerToolLoopWithDeepSeekShape(t *testing.T) {
 			return
 		}
 		// Second call must carry the assistant tool_call and the tool result.
-		if len(req.Messages) < 4 || req.Messages[3].Role != "tool" || req.Messages[3].Content != "echo: go" {
+		if len(req.Messages) < 4 || req.Messages[3].Role != "tool" || string(req.Messages[3].Content) != `"echo: go"` {
 			t.Errorf("second request messages = %+v", req.Messages)
 		}
 		io.WriteString(w, `{"choices":[{"message":{"content":"final answer"}}]}`)
