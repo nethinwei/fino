@@ -173,14 +173,26 @@ type msgMessage struct {
 }
 
 type reqBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
+	Type      string           `json:"type"`
+	Text      string           `json:"text,omitempty"`
+	ID        string           `json:"id,omitempty"`
+	Name      string           `json:"name,omitempty"`
+	Input     json.RawMessage  `json:"input,omitempty"`
+	ToolUseID string           `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage  `json:"content,omitempty"`
+	IsError   bool             `json:"is_error,omitempty"`
+	Source    *anthropicSource `json:"source,omitempty"`
+}
+
+// anthropicSource is the nested source object Anthropic expects for image,
+// audio, video, and document blocks. The fino Block carries these as flat
+// fields; the converter folds them into this object.
+type anthropicSource struct {
+	Type      string `json:"type"` // base64 / url / file
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+	FileID    string `json:"file_id,omitempty"`
 }
 
 type msgTool struct {
@@ -200,6 +212,7 @@ type respBlock struct {
 	ID       string          `json:"id"`
 	Name     string          `json:"name"`
 	Input    json.RawMessage `json:"input"`
+	Source   anthropicSource `json:"source"`
 }
 
 // buildRequest assembles the request body shared by Generate and Stream.
@@ -295,7 +308,86 @@ func respBlocksToBlocks(content []respBlock) []message.Block {
 				input = json.RawMessage("{}")
 			}
 			blocks = append(blocks, message.NewToolUse(b.ID, b.Name, input))
+		case "image", "audio", "video", "document", "file":
+			blocks = append(blocks, sourceToBlock(b.Type, b.Source))
 		}
 	}
 	return blocks
+}
+
+// sourceToBlock folds an Anthropic source object back into a flat fino Block.
+func sourceToBlock(typ string, s anthropicSource) message.Block {
+	b := message.Block{Type: finoBlockType(typ), MediaType: s.MediaType}
+	switch s.Type {
+	case "base64":
+		b.SourceType = message.SourceBase64
+		b.Data = s.Data
+	case "url":
+		b.SourceType = message.SourceURL
+		b.URL = s.URL
+	case "file":
+		b.SourceType = message.SourceFileID
+		b.FileID = s.FileID
+	}
+	return b
+}
+
+// finoBlockType maps an Anthropic block type to a fino BlockType. Anthropic
+// models PDF/document payloads as "document"; fino unifies those as "file".
+func finoBlockType(typ string) message.BlockType {
+	switch typ {
+	case "image":
+		return message.TypeImage
+	case "audio":
+		return message.TypeAudio
+	case "video":
+		return message.TypeVideo
+	case "document", "file":
+		return message.TypeFile
+	default:
+		return message.BlockType(typ)
+	}
+}
+
+// anthropicType maps a fino multimodal BlockType to the Anthropic block type.
+func anthropicType(t message.BlockType) string {
+	switch t {
+	case message.TypeFile:
+		return "document"
+	default:
+		return string(t)
+	}
+}
+
+// sourceFromBlock folds a fino Block's flat source fields into an Anthropic
+// source object. It returns nil when no source is set.
+func sourceFromBlock(b message.Block) *anthropicSource {
+	s := &anthropicSource{MediaType: b.MediaType}
+	switch b.SourceType {
+	case message.SourceBase64:
+		s.Type = "base64"
+		s.Data = b.Data
+	case message.SourceURL:
+		s.Type = "url"
+		s.URL = b.URL
+	case message.SourceFileID:
+		s.Type = "file"
+		s.FileID = b.FileID
+	default:
+		return nil
+	}
+	return s
+}
+
+// Capabilities reports the modalities and sources this adapter supports. The
+// values are provider-wide defaults; per-model support may differ, so callers
+// must still degrade defensively.
+func (m *Model) Capabilities() model.CapabilitiesInfo {
+	return model.CapabilitiesInfo{
+		InputModalities:     []message.BlockType{message.TypeText, message.TypeImage, message.TypeAudio, message.TypeFile},
+		InputSources:        []message.SourceType{message.SourceBase64, message.SourceURL, message.SourceFileID},
+		OutputModalities:    []message.BlockType{message.TypeText, message.TypeImage},
+		SupportsPromptCache: true,
+		SupportsStreaming:   true,
+	}
 }

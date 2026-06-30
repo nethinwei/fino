@@ -59,3 +59,41 @@ func TestExtraOption(t *testing.T) {
 		t.Fatal("absent key reported present")
 	}
 }
+
+// capableModel implements the optional Capabilities interface.
+type capableModel struct{ fakeModel }
+
+func (capableModel) Capabilities() CapabilitiesInfo {
+	return CapabilitiesInfo{
+		InputModalities:   []message.BlockType{message.TypeText, message.TypeImage},
+		InputSources:      []message.SourceType{message.SourceBase64, message.SourceURL},
+		OutputModalities:  []message.BlockType{message.TypeText},
+		SupportsStreaming: true,
+	}
+}
+
+func TestCapabilitiesOptionalInterface(t *testing.T) {
+	// A model that does not implement Capabilities degrades gracefully.
+	var m Model = fakeModel{}
+	if _, ok := m.(Capabilities); ok {
+		t.Fatal("fakeModel should not satisfy Capabilities")
+	}
+
+	// A model that implements it exposes its info.
+	var cm Model = capableModel{}
+	caps, ok := cm.(Capabilities)
+	if !ok {
+		t.Fatal("capableModel should satisfy Capabilities")
+	}
+	info := caps.Capabilities()
+	if len(info.InputModalities) != 2 ||
+		info.InputModalities[1] != message.TypeImage {
+		t.Fatalf("input modalities = %#v", info.InputModalities)
+	}
+	if len(info.InputSources) != 2 || info.InputSources[0] != message.SourceBase64 {
+		t.Fatalf("input sources = %#v", info.InputSources)
+	}
+	if !info.SupportsStreaming {
+		t.Fatal("SupportsStreaming should be true")
+	}
+}

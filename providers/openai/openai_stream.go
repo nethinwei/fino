@@ -15,11 +15,19 @@ import (
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content          string           `json:"content"`
-			ReasoningContent string           `json:"reasoning_content"`
-			ToolCalls        []streamToolCall `json:"tool_calls"`
+			Content          string            `json:"content"`
+			ReasoningContent string            `json:"reasoning_content"`
+			ToolCalls        []streamToolCall  `json:"tool_calls"`
+			Audio            *streamAudioDelta `json:"audio"`
 		} `json:"delta"`
 	} `json:"choices"`
+}
+
+// streamAudioDelta carries an incremental base64 fragment of model-generated
+// audio (GPT-4o audio output).
+type streamAudioDelta struct {
+	ID    string `json:"id"`
+	Delta string `json:"delta"`
 }
 
 type streamToolCall struct {
@@ -83,6 +91,7 @@ type accCall struct {
 type accumulator struct {
 	text      strings.Builder
 	reasoning strings.Builder
+	audio     strings.Builder
 	calls     []*accCall
 	idx       map[int]int
 }
@@ -95,6 +104,9 @@ func (a *accumulator) apply(chunk streamChunk) (text, reasoning string) {
 		reasoning += choice.Delta.ReasoningContent
 		a.text.WriteString(choice.Delta.Content)
 		a.reasoning.WriteString(choice.Delta.ReasoningContent)
+		if choice.Delta.Audio != nil {
+			a.audio.WriteString(choice.Delta.Audio.Delta)
+		}
 		for _, tc := range choice.Delta.ToolCalls {
 			a.foldToolCall(tc)
 		}
@@ -122,12 +134,15 @@ func (a *accumulator) foldToolCall(tc streamToolCall) {
 
 // finalMessage builds the assistant message from accumulated state.
 func (a *accumulator) finalMessage() message.Message {
-	blocks := make([]message.Block, 0, 2+len(a.calls))
+	blocks := make([]message.Block, 0, 3+len(a.calls))
 	if reasoning := a.reasoning.String(); reasoning != "" {
 		blocks = append(blocks, message.NewThinking(reasoning))
 	}
 	if text := a.text.String(); text != "" {
 		blocks = append(blocks, message.NewText(text))
+	}
+	if audio := a.audio.String(); audio != "" {
+		blocks = append(blocks, message.NewAudio("audio/wav", message.WithBase64(audio)))
 	}
 	for _, call := range a.calls {
 		blocks = append(blocks, message.NewToolUse(call.id, call.name, json.RawMessage(call.args.String())))

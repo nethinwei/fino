@@ -83,6 +83,20 @@ type Runner struct {
 	maxConcurrency int
 }
 
+// Capabilities reports the configured model's capabilities when it implements
+// the optional model.Capabilities interface. It returns pure data — callers
+// cannot reach the Model interface through it, so they cannot bypass the
+// Runner's authorization, hooks, and invariant protection by calling
+// Generate/Stream directly. The second result is false when the model does not
+// implement model.Capabilities; callers should then degrade to text-only.
+func (r *Runner) Capabilities() (model.CapabilitiesInfo, bool) {
+	c, ok := r.model.(model.Capabilities)
+	if !ok {
+		return model.CapabilitiesInfo{}, false
+	}
+	return c.Capabilities(), true
+}
+
 // Option configures a Runner.
 type Option func(*Runner)
 

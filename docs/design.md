@@ -135,8 +135,9 @@ Eino 展示了边界模糊的风险：组件契约、图编译、工作流状态
 - `tool_use`
 - `tool_result`
 - `thinking`
+- `image` / `audio` / `video` / `file`（多模态）
 
-核心不内置图片、音频或视频块。如果某个 provider 支持多模态输入，适配器可以在核心消息模型之外把用户数据翻译成 provider 请求体。
+核心内置 `image` / `audio` / `video` / `file` 四种多模态块，与 `text` 同属基本内容原语：多模态输入需在 Runner 的 ReAct 循环里随 `message.Message` 流转（用户输入、工具结果均可携带），把它排除在核心之外会迫使多模态走一条绕过 `message.Block` 的旁路，破坏单一消息模型与无隐藏状态原则。多模态 payload 用扁平的 `SourceType`（`base64` / `url` / `file_id`）承载，不引入嵌套 `source` 子对象；provider 适配器负责把扁平字段折叠成各自 wire format（如 Anthropic 的嵌套 `source`、OpenAI 的 `image_url` / `input_audio` content part）。`url` 与 `file_id` 优先于 `base64` 以控制序列化体积；`base64` 适用于小文件或必须内联的场景。各 provider 支持的模态与来源不一致，通过可选的 `model.Capabilities` 接口暴露，上层据此路由与降级。
 
 消息块使用扁平 discriminated union，而不是嵌套结构体指针。这样核心 JSON 形态更接近主流 provider，也减少 adapter 转换成本。
 
@@ -150,6 +151,14 @@ type Block struct {
     ToolUseID string          `json:"tool_use_id,omitempty"`
     Content   []Block         `json:"content,omitempty"`
     IsError   bool            `json:"is_error,omitempty"`
+
+    // 多模态字段（Type 为 image/audio/video/file 时有意义）
+    SourceType SourceType `json:"source_type,omitempty"`
+    MediaType  string     `json:"media_type,omitempty"`
+    Data       string     `json:"data,omitempty"`
+    URL        string     `json:"url,omitempty"`
+    FileID     string     `json:"file_id,omitempty"`
+    Detail     string     `json:"detail,omitempty"`
 }
 ```
 
@@ -167,6 +176,8 @@ type Model interface {
 ```
 
 Runner 调用模型时会合并两层模型选项：先应用 Mode 默认选项，再应用本次运行的 `runner.WithModelOptions(...)`。本次运行选项优先生效。
+
+`model.Model` 可选实现 `model.Capabilities` 接口，暴露支持的输入/输出模态、来源、是否支持 prompt cache 与流式。上层（如 `x/agui` 的 `Runtime.Capabilities()`）用 `m.(model.Capabilities)` 断言读取，未实现时按仅文本降级。能力是 provider 级静态默认，不反映具体模型名差异，上层仍需对不支持的多模态做防御性降级。
 
 核心包只定义接口。Provider 适配器不在初始核心包中，可以作为独立 module、独立 repo 或未来 add-on 包提供，例如：
 

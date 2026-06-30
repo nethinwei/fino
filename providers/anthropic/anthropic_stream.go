@@ -16,10 +16,11 @@ type streamEvent struct {
 	Type         string `json:"type"`
 	Index        int    `json:"index"`
 	ContentBlock struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Text string `json:"text"`
+		Type   string          `json:"type"`
+		ID     string          `json:"id"`
+		Name   string          `json:"name"`
+		Text   string          `json:"text"`
+		Source anthropicSource `json:"source"`
 	} `json:"content_block"`
 	Delta struct {
 		Type        string `json:"type"`
@@ -66,6 +67,7 @@ type accBlock struct {
 	text     strings.Builder
 	thinking strings.Builder
 	input    strings.Builder
+	source   anthropicSource
 }
 
 // accumulator assembles streamed content blocks into a final message.
@@ -79,7 +81,7 @@ type accumulator struct {
 func (a *accumulator) apply(ev streamEvent) []model.Event {
 	switch ev.Type {
 	case "content_block_start":
-		b := &accBlock{typ: ev.ContentBlock.Type, id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+		b := &accBlock{typ: ev.ContentBlock.Type, id: ev.ContentBlock.ID, name: ev.ContentBlock.Name, source: ev.ContentBlock.Source}
 		a.blocks = append(a.blocks, b)
 		a.idx[ev.Index] = b
 		// A text block may carry initial text in its start event; surface it as
@@ -87,6 +89,11 @@ func (a *accumulator) apply(ev streamEvent) []model.Event {
 		if b.typ == "text" && ev.ContentBlock.Text != "" {
 			b.text.WriteString(ev.ContentBlock.Text)
 			return []model.Event{model.TextDelta{Text: ev.ContentBlock.Text}}
+		}
+		// Multimodal blocks arrive complete in the start event; surface the full
+		// block as a delta so streaming consumers observe it.
+		if isMediaBlockType(b.typ) {
+			return []model.Event{model.ContentBlockDelta{Index: ev.Index, Block: sourceToBlock(b.typ, b.source)}}
 		}
 	case "content_block_delta":
 		return a.applyDelta(ev)
@@ -129,7 +136,19 @@ func (a *accumulator) finalMessage() message.Message {
 				input = "{}"
 			}
 			blocks = append(blocks, message.NewToolUse(b.id, b.name, json.RawMessage(input)))
+		case "image", "audio", "video", "document", "file":
+			blocks = append(blocks, sourceToBlock(b.typ, b.source))
 		}
 	}
 	return message.Assistant(blocks...)
+}
+
+// isMediaBlockType reports whether an Anthropic block type is a multimodal
+// block that arrives complete in its start event.
+func isMediaBlockType(typ string) bool {
+	switch typ {
+	case "image", "audio", "video", "document", "file":
+		return true
+	}
+	return false
 }

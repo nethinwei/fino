@@ -6,6 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-01
+
+### Added
+
+- **Multimodal content blocks in core.** `message.Block` now has `image`,
+  `audio`, `video`, and `file` block types with a flat `SourceType` abstraction
+  (`base64` / `url` / `file_id`). Constructors `NewImage` / `NewAudio` /
+  `NewVideo` / `NewFile` take a media type plus `WithBase64` / `WithURL` /
+  `WithFileID` / `WithDetail` options. Multimodal blocks carry payload in flat
+  fields rather than a nested `source` object; provider adapters fold them into
+  their wire format. Multimodal input flows through the ReAct loop as
+  `message.Message`, and `tool.Result.Content` (`[]message.Block`) carries
+  multimodal tool results with no extra plumbing.
+- **Optional `model.Capabilities` interface.** A `Model` may implement
+  `Capabilities()` to report its input/output modalities, input sources, and
+  prompt-cache/streaming support. Callers assert `m.(model.Capabilities)` and
+  degrade to text-only when absent. The info is provider-wide and static.
+- **`runner.Runner.Capabilities()` accessor.** Reports the configured model's
+  capabilities (when it implements `model.Capabilities`) as pure data, so
+  adapters (such as `x/agui`) can do capability discovery without reaching the
+  `Model` interface — they cannot bypass the Runner's authorization, hooks, and
+  invariant protection by calling `Generate`/`Stream` directly. The Runner still
+  holds only configuration; this is a read-only accessor, not new state.
+- **Anthropic multimodal input and output.** User, assistant, and tool_result
+  content folds fino blocks into Anthropic's nested `source` object; tool_result
+  content stays a JSON string for text-only results and becomes a block array
+  for multimodal results. Response and stream image/audio/video/document blocks
+  unfold back into flat fino blocks. `Model` implements `model.Capabilities`.
+- **OpenAI multimodal input and output.** Multimodal blocks serialize to
+  `image_url` (base64 folded into a `data:` URL or passed as a URL) and
+  `input_audio` content parts. Video and file inputs degrade to a text
+  placeholder since Chat Completions has no standard part for them. Response
+  parsing handles both content-array image output and the standalone `audio`
+  field; streaming accumulates audio deltas into a final audio block. `Model`
+  implements `model.Capabilities`.
+- **AG-UI multimodal mapping.** `x/agui` converts OpenAI-style multimodal user
+  content (text / `image_url` / `input_audio` arrays, including `data:` URL
+  base64) into fino blocks on input, and surfaces assistant multimodal blocks as
+  `CUSTOM` events named `multimodal_block` on output (AG-UI defines no standard
+  image/audio event). `validateAssistantBlocks` accepts multimodal types.
+  `Runtime.Capabilities()` reads `model.Capabilities` via the new
+  `runner.Runner.Model()` accessor and reports input/output modalities.
+
+### Changed
+
+- **Breaking (internal): `providers/anthropic` `reqBlock.Content` is now
+  `json.RawMessage`.** It was a `string`. Tool-result content is now a JSON
+  string for text-only results and a block array for multimodal results. This is
+  an internal type; no public API is affected.
+- **Breaking (internal): `providers/openai` `chatMessage.Content` and
+  `chatResponse` content are now `json.RawMessage`.** They were `string`. Text
+  content stays a JSON string and multimodal content becomes an array. This is
+  an internal type; no public API is affected.
+
+### Notes
+
+- Video input support depends on the provider: Anthropic accepts it on some
+  models; OpenAI Chat Completions has no standard video part and degrades to a
+  text placeholder. `model.Capabilities` reflects the provider-wide default.
+- OpenAI tool-result content accepts only a string, so multimodal tool results
+  degrade to a text placeholder on the OpenAI path (Anthropic is lossless).
+- Model-generated audio arrives as incremental base64 deltas over the wire;
+  fino accumulates them and emits a single complete `audio` block in the
+  `TurnMessage` snapshot rather than per-fragment stream events. Streaming
+  consumers should read multimodal output from `TurnMessage`, not from
+  `ContentBlockDelta`.
+
 ## [0.9.1] - 2026-07-01
 
 ### Changed

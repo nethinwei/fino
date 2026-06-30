@@ -1,6 +1,8 @@
 package anthropic
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/nethinwei/fino/message"
@@ -23,14 +25,15 @@ func toAnthropicMessages(msgs []message.Message) (string, []msgMessage) {
 		case message.RoleAssistant:
 			out = append(out, msgMessage{Role: "assistant", Content: assistantBlocks(msg)})
 		default:
-			out = append(out, msgMessage{Role: "user", Content: []reqBlock{{Type: "text", Text: msg.Text()}}})
+			out = append(out, msgMessage{Role: "user", Content: userBlocks(msg)})
 		}
 	}
 	return system.String(), out
 }
 
 // toolResultBlocks converts a RoleTool message's tool_result blocks. Content is
-// sent as a plain string, which the Messages API accepts.
+// sent as a plain JSON string when only text is present, or as an array of
+// blocks when the result carries multimodal content (e.g. a screenshot).
 func toolResultBlocks(msg message.Message) []reqBlock {
 	out := make([]reqBlock, 0, len(msg.Content))
 	for _, b := range msg.Content {
@@ -38,7 +41,7 @@ func toolResultBlocks(msg message.Message) []reqBlock {
 			out = append(out, reqBlock{
 				Type:      "tool_result",
 				ToolUseID: b.ToolUseID,
-				Content:   blocksText(b.Content),
+				Content:   toolResultContent(b.Content),
 				IsError:   b.IsError,
 			})
 		}
@@ -46,9 +49,42 @@ func toolResultBlocks(msg message.Message) []reqBlock {
 	return out
 }
 
-// assistantBlocks converts an assistant message's text and tool_use blocks.
-// Thinking blocks are omitted: replaying them requires a provider signature the
-// core does not carry, and the Messages API rejects unsigned thinking blocks.
+// toolResultContent marshals a tool_result's nested blocks to Anthropic's
+// content field: a plain JSON string when only text is present, or an array of
+// blocks when multimodal content is present. An empty text result returns nil
+// so the field is omitted via omitempty, matching the pre-multimodal behavior.
+func toolResultContent(blocks []message.Block) json.RawMessage {
+	if onlyText(blocks) {
+		s := blocksText(blocks)
+		if s == "" {
+			return nil
+		}
+		return json.RawMessage(strconv.Quote(s))
+	}
+	parts := make([]reqBlock, 0, len(blocks))
+	for _, b := range blocks {
+		parts = append(parts, blockToReqBlock(b))
+	}
+	data, err := json.Marshal(parts)
+	if err != nil {
+		return json.RawMessage(strconv.Quote(blocksText(blocks)))
+	}
+	return data
+}
+
+func onlyText(blocks []message.Block) bool {
+	for _, b := range blocks {
+		if b.Type != message.TypeText {
+			return false
+		}
+	}
+	return true
+}
+
+// assistantBlocks converts an assistant message's text, tool_use, and
+// multimodal blocks. Thinking blocks are omitted: replaying them requires a
+// provider signature the core does not carry, and the Messages API rejects
+// unsigned thinking blocks.
 func assistantBlocks(msg message.Message) []reqBlock {
 	out := make([]reqBlock, 0, len(msg.Content))
 	for _, b := range msg.Content {
@@ -57,9 +93,41 @@ func assistantBlocks(msg message.Message) []reqBlock {
 			out = append(out, reqBlock{Type: "text", Text: b.Text})
 		case message.TypeToolUse:
 			out = append(out, reqBlock{Type: "tool_use", ID: b.ID, Name: b.Name, Input: b.Input})
+		case message.TypeImage, message.TypeAudio, message.TypeVideo, message.TypeFile:
+			out = append(out, finoMediaBlock(b))
 		}
 	}
 	return out
+}
+
+// userBlocks converts a user message's blocks, including multimodal content.
+func userBlocks(msg message.Message) []reqBlock {
+	if len(msg.Content) == 0 {
+		return []reqBlock{{Type: "text", Text: ""}}
+	}
+	out := make([]reqBlock, 0, len(msg.Content))
+	for _, b := range msg.Content {
+		out = append(out, blockToReqBlock(b))
+	}
+	return out
+}
+
+// blockToReqBlock converts any fino block into its Anthropic reqBlock form.
+func blockToReqBlock(b message.Block) reqBlock {
+	switch b.Type {
+	case message.TypeText:
+		return reqBlock{Type: "text", Text: b.Text}
+	case message.TypeImage, message.TypeAudio, message.TypeVideo, message.TypeFile:
+		return finoMediaBlock(b)
+	default:
+		return reqBlock{Type: string(b.Type), Text: b.Text}
+	}
+}
+
+// finoMediaBlock folds a fino multimodal block into an Anthropic reqBlock with
+// a nested source object.
+func finoMediaBlock(b message.Block) reqBlock {
+	return reqBlock{Type: anthropicType(b.Type), Source: sourceFromBlock(b)}
 }
 
 // blocksText concatenates the text of all text-type blocks.

@@ -157,7 +157,7 @@ func TestToAnthropicMessagesToolRoundtrip(t *testing.T) {
 		t.Fatalf("assistant = %+v", out[1])
 	}
 	if out[2].Role != "user" || out[2].Content[0].Type != "tool_result" ||
-		out[2].Content[0].ToolUseID != "toolu_1" || out[2].Content[0].Content != "sunny" {
+		out[2].Content[0].ToolUseID != "toolu_1" || string(out[2].Content[0].Content) != `"sunny"` {
 		t.Fatalf("tool_result message = %+v", out[2])
 	}
 }
@@ -229,7 +229,7 @@ func TestRunnerToolLoopWithDeepSeekShape(t *testing.T) {
 		}
 		// Second call must carry the tool_result in a user message.
 		last := req.Messages[len(req.Messages)-1]
-		if last.Role != "user" || last.Content[0].Type != "tool_result" || last.Content[0].Content != "echo: go" {
+		if last.Role != "user" || last.Content[0].Type != "tool_result" || string(last.Content[0].Content) != `"echo: go"` {
 			t.Errorf("second request last message = %+v", last)
 		}
 		io.WriteString(w, `{"content":[{"type":"text","text":"final answer"}]}`)
