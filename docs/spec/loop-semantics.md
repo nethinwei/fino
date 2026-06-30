@@ -1,8 +1,10 @@
 # fino ReAct 循环形式化语义
 
-> 本文是 `fino` Runner 循环的规范性参考（normative reference）。它把 `docs/design.md` 中的散文描述升级为可机器检查的状态转移系统，并定义一组对任意输入都成立的不变量。`runner/runner.go` 是本规约的参考实现；当实现与本规约冲突时，以本规约为准并修正实现。
+> 本文是 `fino` ReAct 循环的规范性参考（normative reference）。它把 `docs/design.md` 中的散文描述升级为可机器检查的状态转移系统，并定义一组对任意输入都成立的不变量。
 >
-> 适用范围：`runner.Run`、`runner.Stream` 与 `runner.ResumeApproved`。涵盖 turn 边界、工具批次（串行与并行）、handoff、Policy 授权、Hooks 触发、`ctx` 取消、挂起与审批恢复、终止错误。
+> **v0.9.1 边界变更**：多轮循环已从核心 `runner` 移至 `x/react`。本文描述的循环语义不变，但实现拆为两层：核心 `runner` 提供单步原语（`Run.Step` / `Run.StreamStep` / `Runner.NewResumeRun` 等）与执行一致性机制，`x/react.Loop`（`Loop.Run` / `Loop.Stream` / `Loop.ResumeApproved`）按本规约的 turn 转移把它们拼成多轮循环。下文出现的 `Runner.Run` / `Runner.Stream` / `Runner.ResumeApproved` 指代该循环入口（现由 `x/react.Loop` 承载）；单步级行为（模型调用、工具批次、授权、hooks、idempotency、stream 事件）仍由核心原语实现。当实现与本规约冲突时，以本规约为准并修正实现。
+>
+> 适用范围：`react.Loop.Run`、`react.Loop.Stream` 与 `react.Loop.ResumeApproved`（由核心单步原语驱动）。涵盖 turn 边界、工具批次（串行与并行）、handoff、Policy 授权、Hooks 触发、`ctx` 取消、挂起与审批恢复、终止错误。
 
 ## 1. 记号
 

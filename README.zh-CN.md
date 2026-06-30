@@ -34,13 +34,13 @@ fino 只干一件事，并且尽量干好：把让 LLM Agent 真正能用起来�
 | 可观测 | `hooks.Hooks` | 日志、tracing、指标、成本统计 |
 | 多 Agent | handoff 工具 | LLM 自己决定转移，或者用普通 Go 控制流写死流程 |
 | 记忆和历史 | 显式传消息 | SQLite、Redis、文件，或自家的 session 系统 |
-| 执行 | `runner.Run` / `runner.Stream` | HTTP handler、CLI、队列、cron、工作流 |
+| 执行 | `react.Loop.Run` / `react.Loop.Stream`（`x/react`） | HTTP handler、CLI、队列、cron、工作流 |
 
-一个能力想进核心，得同时满足两条：它是 ReAct 循环的一部分，而且没法靠 Tool、Policy、Hook、Mode、Model 或 Runner 外面的代码干净地实现。否则它就该待在业务代码、示例或扩展包里，进不来。
+一个能力想进核心，得同时满足两条：它是单个 ReAct 回合的一部分，而且没法靠 Tool、Policy、Hook、Mode、Model 或 Runner 单步原语外面的代码干净地实现。否则它就该待在业务代码、示例或扩展包里，进不来。核心一次只跑一个回合；多轮循环在 `x/react`（或你自己写）。
 
 ## 能做什么
 
-- **把 ReAct 循环做对**：轮数上限、工具授权、生命周期钩子，以及干净的终止逻辑。
+- **单步 ReAct 原语，做对了**：核心通过 `Run.Step` / `Run.StreamStep` 跑一个回合（模型调用 + 授权/执行工具批），带工具授权、生命周期钩子、挂起/恢复、效应感知并发、干净终止。`x/react` 把它们拼成带轮数上限的循环。
 - **流式就是语义事件**：文本增量、实时思考、工具调用、工具结果、转移，每个模型 turn 一份完整 assistant 快照（`TurnMessage`），以及整个 run 一份终态事件——完成时 `FinalMessage`、Policy 挂起待审批时 `Suspended`，统统走 `iter.Seq2`。
 - **Mode（模式）**：一个 agent 挂多副人格，各有各的指令、工具和模型参数。
 - **Handoff（转移）**：模型驱动的 agent 间切换，本质上就是一个普通工具。
@@ -74,6 +74,7 @@ import (
 	"github.com/nethinwei/fino/providers/deepseek"
 	"github.com/nethinwei/fino/runner"
 	"github.com/nethinwei/fino/tool"
+	"github.com/nethinwei/fino/x/react"
 )
 
 type addInput struct {
@@ -93,7 +94,8 @@ func main() {
 	a, _ := agent.New("assistant", agent.WithMode(mode), agent.WithDefaultMode("default"))
 
 	r, _ := runner.New(m)
-	result, _ := r.Run(context.Background(), a, runner.Text("What is 2 + 3? Use the add tool."))
+	l, _ := react.New(r)
+	result, _ := l.Run(context.Background(), a, runner.Text("What is 2 + 3? Use the add tool."))
 	fmt.Println(result.Text())
 }
 ```
@@ -115,17 +117,19 @@ model/    Model 接口（Generate + Stream）、流事件类型
 agent/    Agent、Mode（指令 + 工具）、handoff 工具 helper
 policy/   Policy 接口（执行前授权）、AllowAll 默认实现
 hooks/    生命周期钩子（BeforeModel / AfterModel / BeforeTool / AfterTool / OnError）
-runner/   ReAct 循环执行器：Run、Stream、Input、Result
+runner/   ReAct 单步原语：NewRun、Step、StreamStep、NewResumeRun、Input、Result
+x/react/  参考多轮循环：Loop.Run、Loop.Stream、Loop.ResumeApproved
 ```
 
-Runner 本身只存配置，每次运行各自拿一份消息列表，所以一个 Runner 拿去并发复用也没问题。
+Runner 本身只存配置，每次运行各自拿一份消息列表，所以一个 Runner 拿去并发复用也没问题。核心不内置多轮循环——`x/react` 提供参考循环，或者你基于 `Run.Step` 自己写。
 
 ## 流式
 
 `Stream` 吐出来的是语义事件，可以直接接终端 UI、WebSocket 或 trace。
 
 ```go
-for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
+// l, _ := react.New(r)  // 用上面的 Runner 建一个 Loop
+for ev, err := range l.Stream(ctx, a, runner.Text(prompt)) {
 	if err != nil {
 		log.Fatal(err) // 终止错误，迭代到此为止
 	}
@@ -147,7 +151,7 @@ for ev, err := range r.Stream(ctx, a, runner.Text(prompt)) {
 	case model.Suspended:
 		// Policy 挂起批次待人工审批；重建 SuspendedRun 后恢复：
 		//   sr := runner.SuspendedRunFrom(e)
-		//   r.ResumeApproved(ctx, a, sr, approvals)
+		//   l.ResumeApproved(ctx, a, sr, approvals)
 	}
 }
 ```
@@ -185,6 +189,7 @@ func (confirmPolicy) Authorize(ctx context.Context, req policy.Request) (policy.
 }
 
 r, _ := runner.New(m, runner.WithPolicy(confirmPolicy{}))
+l, _ := react.New(r)
 ```
 
 被拒的调用会拿到一个 `*runner.ToolDeniedError`；要是返回了 error，那是 Policy 系统自己出毛病了——这两种情况是分开看的。
@@ -204,6 +209,7 @@ r, _ := runner.New(m, runner.WithHooks(&hooks.Hooks{
 	},
 	OnError: func(ctx context.Context, err error) { log.Printf("出错: %v", err) },
 }))
+l, _ := react.New(r)
 ```
 
 ## Mode 和多 Agent 转移
@@ -215,7 +221,8 @@ plan, _ := agent.NewMode("plan", "Think and outline. Do not edit files.")
 code, _ := agent.NewMode("code", "Implement the plan.", agent.WithTools(editFile))
 a, _ := agent.New("assistant", agent.WithMode(plan), agent.WithMode(code), agent.WithDefaultMode("plan"))
 
-result, _ := r.Run(ctx, a, runner.Text("加一个 /health 接口"), runner.WithMode("code"))
+// r, _ := runner.New(m); l, _ := react.New(r)  // 用上面的 Runner + Loop
+result, _ := l.Run(ctx, a, runner.Text("加一个 /health 接口"), runner.WithMode("code"))
 
 // 把活儿交给专门的 agent，本质就是一个普通工具：
 handoff, _ := agent.NewHandoffTool(reviewer)
@@ -275,7 +282,7 @@ fino 的命题是：**复杂工具型 Agent 的可靠执行基础设施，不需
 | Add-on | 难题 | 依赖的接缝 |
 | --- | --- | --- |
 | [`x/replay`](x/replay) | 可复现与审计 | 在公共接缝上记录 execution tape——模型响应、Policy 决策、工具执行、suspend、approval、resume 与终止；重放时不调用真实 provider、工具或 Policy |
-| [`x/recover`](x/recover) | 崩溃恢复与续跑 | 安全边界续跑（`history + mode`）及盲恢复的 opt-in pending-tool 接缝；HITL 审批恢复由 `runner.ResumeApproved` 承载，不经 `x/recover` |
+| [`x/recover`](x/recover) | 崩溃恢复与续跑 | 安全边界续跑（`history + mode`）及盲恢复的 opt-in pending-tool 接缝；HITL 审批恢复由 `react.Loop.ResumeApproved` 承载，不经 `x/recover` |
 | [`x/trace`](x/trace) | tracing 与可观测性 | `hooks.Hooks` 的确定触发顺序 |
 | [`x/budget`](x/budget) | 成本 / token 预算 | `model.Model` 装饰器 |
 | [`x/eval`](x/eval) | 可复现回归测试 | 在已记录的 tape 上跑确定性用例；`RunWithOptions` 可为依赖 Policy 的 fixture 接入 `ReplayPolicy` |

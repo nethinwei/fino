@@ -17,6 +17,12 @@ import (
 // NewResumeRun), so the tests keep driving a multi-turn run without the core
 // exposing one publicly. They are unavailable to non-test builds and to other
 // packages.
+//
+// The loop here mirrors x/react.Loop.Run/Stream/ResumeApproved. The two cannot
+// share code: runner (even its tests) cannot import x/react without an import
+// cycle. If the loop's turn/termination semantics change, update both copies.
+// The mirror is the cost of keeping the runner package's existing multi-turn
+// tests in place; migrating those tests to x/react would drop it.
 
 const testDefaultMaxTurns = 10
 
