@@ -28,6 +28,12 @@ type streamEvent struct {
 		Thinking    string `json:"thinking"`
 		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
+	// Message.Usage carries the input-side usage from the message_start event.
+	Message struct {
+		Usage *anthropicUsage `json:"usage"`
+	} `json:"message"`
+	// Usage carries the output-side usage from the message_delta event.
+	Usage *anthropicUsage `json:"usage"`
 }
 
 // Stream consumes the Anthropic/DeepSeek SSE response, yielding a
@@ -74,12 +80,26 @@ type accBlock struct {
 type accumulator struct {
 	blocks []*accBlock
 	idx    map[int]*accBlock
+	usage  *anthropicUsage
 }
 
 // apply folds one event into the accumulator and returns any deltas it carried
 // (text or thinking) as events to emit.
 func (a *accumulator) apply(ev streamEvent) []model.Event {
 	switch ev.Type {
+	case "message_start":
+		if ev.Message.Usage != nil {
+			a.usage = ev.Message.Usage
+		}
+	case "message_delta":
+		// The output_tokens field is cumulative; the last delta carries the
+		// final value.
+		if ev.Usage != nil {
+			if a.usage == nil {
+				a.usage = &anthropicUsage{}
+			}
+			a.usage.OutputTokens = ev.Usage.OutputTokens
+		}
 	case "content_block_start":
 		b := &accBlock{typ: ev.ContentBlock.Type, id: ev.ContentBlock.ID, name: ev.ContentBlock.Name, source: ev.ContentBlock.Source}
 		a.blocks = append(a.blocks, b)
@@ -140,7 +160,9 @@ func (a *accumulator) finalMessage() message.Message {
 			blocks = append(blocks, sourceToBlock(b.typ, b.source))
 		}
 	}
-	return message.Assistant(blocks...)
+	msg := message.Assistant(blocks...)
+	msg.Usage = usageToMessage(a.usage)
+	return msg
 }
 
 // isMediaBlockType reports whether an Anthropic block type is a multimodal

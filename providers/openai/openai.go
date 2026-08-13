@@ -99,22 +99,29 @@ func New(modelName string, opts ...Option) (*Model, error) {
 }
 
 type chatRequest struct {
-	Model            string        `json:"model"`
-	Messages         []chatMessage `json:"messages"`
-	Tools            []chatTool    `json:"tools,omitempty"`
-	Temperature      *float32      `json:"temperature,omitempty"`
-	TopP             *float32      `json:"top_p,omitempty"`
-	MaxTokens        *int          `json:"max_tokens,omitempty"`
-	Stop             []string      `json:"stop,omitempty"`
-	Seed             *int          `json:"seed,omitempty"`
-	FrequencyPenalty *float32      `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float32      `json:"presence_penalty,omitempty"`
-	ReasoningEffort  string        `json:"reasoning_effort,omitempty"`
-	Stream           bool          `json:"stream,omitempty"`
+	Model            string         `json:"model"`
+	Messages         []chatMessage  `json:"messages"`
+	Tools            []chatTool     `json:"tools,omitempty"`
+	Temperature      *float32       `json:"temperature,omitempty"`
+	TopP             *float32       `json:"top_p,omitempty"`
+	MaxTokens        *int           `json:"max_tokens,omitempty"`
+	Stop             []string       `json:"stop,omitempty"`
+	Seed             *int           `json:"seed,omitempty"`
+	FrequencyPenalty *float32       `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float32       `json:"presence_penalty,omitempty"`
+	ReasoningEffort  string         `json:"reasoning_effort,omitempty"`
+	Stream           bool           `json:"stream,omitempty"`
+	StreamOptions    *streamOptions `json:"stream_options,omitempty"`
 
 	// extraBody carries provider-specific top-level fields merged in by
 	// MarshalJSON. It is unexported so it never serializes directly.
 	extraBody map[string]any
+}
+
+// streamOptions carries the OpenAI stream_options object. It is set only on
+// streaming requests so the terminal chunk includes usage.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // MarshalJSON serializes the request and merges any extra body fields as
@@ -237,6 +244,42 @@ type chatResponse struct {
 			Audio            *respAudio      `json:"audio"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage *chatUsage `json:"usage"`
+}
+
+// chatUsage mirrors the OpenAI usage object plus the DeepSeek extension fields
+// (prompt_cache_hit_tokens / prompt_cache_miss_tokens) on the same
+// OpenAI-compatible endpoint.
+type chatUsage struct {
+	PromptTokens          int                 `json:"prompt_tokens"`
+	CompletionTokens      int                 `json:"completion_tokens"`
+	PromptTokensDetails   promptTokensDetails `json:"prompt_tokens_details"`
+	PromptCacheHitTokens  int                 `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int                 `json:"prompt_cache_miss_tokens"`
+}
+
+// promptTokensDetails carries OpenAI's per-category input token counts.
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// usageToMessage normalizes an OpenAI/DeepSeek usage object into message.Usage.
+// The cache-hit portion is taken from OpenAI's cached_tokens or, when the
+// provider is DeepSeek, its prompt_cache_hit_tokens field; CacheWriteTokens is
+// always zero because neither provider reports cache writes.
+func usageToMessage(u *chatUsage) *message.Usage {
+	if u == nil {
+		return nil
+	}
+	cacheRead := u.PromptTokensDetails.CachedTokens
+	if u.PromptCacheHitTokens > cacheRead {
+		cacheRead = u.PromptCacheHitTokens
+	}
+	return &message.Usage{
+		InputTokens:     u.PromptTokens,
+		OutputTokens:    u.CompletionTokens,
+		CacheReadTokens: cacheRead,
+	}
 }
 
 // buildRequest assembles the chat request body shared by Generate and Stream.
@@ -250,6 +293,9 @@ func (m *Model) buildRequest(messages []message.Message, tools []tool.Info, opts
 		TopP:        cfg.TopP,
 		MaxTokens:   cfg.MaxTokens,
 		Stream:      stream,
+	}
+	if stream {
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	applyExtras(&req, cfg)
 	return req
@@ -341,6 +387,7 @@ func (m *Model) Generate(ctx context.Context, messages []message.Message, tools 
 		blocks = append(blocks, message.NewToolUse(tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments)))
 	}
 	msg := message.Assistant(blocks...)
+	msg.Usage = usageToMessage(cr.Usage)
 	return &msg, nil
 }
 

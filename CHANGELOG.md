@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Token usage transparency.** `message.Message` now carries an optional
+  `Usage` field (`message.Usage`) with provider-normalized token accounting:
+  `InputTokens` (total input including cache hits), `OutputTokens`,
+  `CacheReadTokens` (the cache-hit subset of input), and `CacheWriteTokens`
+  (input newly written to cache; zero for providers that do not report it).
+  `providers/openai` parses OpenAI's `prompt_tokens_details.cached_tokens` and
+  DeepSeek's `prompt_cache_hit_tokens` on both Generate and Stream (streaming
+  requests now send `stream_options.include_usage`); `providers/anthropic`
+  parses `cache_creation_input_tokens` / `cache_read_input_tokens` on Generate
+  and from the `message_start` / `message_delta` stream events. The cache hit
+  rate is `CacheReadTokens / InputTokens` across providers. Observers
+  (`x/budget`, `x/trace`, `x/replay`, hooks) inherit usage through
+  `message.Message` with no changes.
+
 ## [0.9.2] - 2026-07-01
 
 ### Added

@@ -21,6 +21,7 @@ type streamChunk struct {
 			Audio            *streamAudioDelta `json:"audio"`
 		} `json:"delta"`
 	} `json:"choices"`
+	Usage *chatUsage `json:"usage"`
 }
 
 // streamAudioDelta carries an incremental base64 fragment of model-generated
@@ -69,6 +70,9 @@ func (a *accumulator) handle(payload string) ([]model.Event, bool, error) {
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 		return nil, false, err
 	}
+	if chunk.Usage != nil {
+		a.usage = chunk.Usage
+	}
 	text, reasoning := a.apply(chunk)
 	var events []model.Event
 	if reasoning != "" {
@@ -94,6 +98,7 @@ type accumulator struct {
 	audio     strings.Builder
 	calls     []*accCall
 	idx       map[int]int
+	usage     *chatUsage
 }
 
 // apply folds one chunk into the accumulator and returns the text and
@@ -147,5 +152,7 @@ func (a *accumulator) finalMessage() message.Message {
 	for _, call := range a.calls {
 		blocks = append(blocks, message.NewToolUse(call.id, call.name, json.RawMessage(call.args.String())))
 	}
-	return message.Assistant(blocks...)
+	msg := message.Assistant(blocks...)
+	msg.Usage = usageToMessage(a.usage)
+	return msg
 }

@@ -202,7 +202,31 @@ type msgTool struct {
 }
 
 type msgResponse struct {
-	Content []respBlock `json:"content"`
+	Content []respBlock     `json:"content"`
+	Usage   *anthropicUsage `json:"usage"`
+}
+
+// anthropicUsage mirrors the Anthropic usage object. Note that Anthropic's
+// input_tokens excludes cache reads and writes, which are reported separately.
+type anthropicUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// usageToMessage normalizes an Anthropic usage object into message.Usage,
+// where InputTokens is the total input including cache reads and writes.
+func usageToMessage(u *anthropicUsage) *message.Usage {
+	if u == nil {
+		return nil
+	}
+	return &message.Usage{
+		InputTokens:      u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadInputTokens,
+		CacheWriteTokens: u.CacheCreationInputTokens,
+	}
 }
 
 type respBlock struct {
@@ -290,6 +314,7 @@ func (m *Model) Generate(ctx context.Context, messages []message.Message, tools 
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	msg := message.Assistant(respBlocksToBlocks(mr.Content)...)
+	msg.Usage = usageToMessage(mr.Usage)
 	return &msg, nil
 }
 
