@@ -50,12 +50,6 @@ func (r *recorder) Begin(ctx context.Context, op string) (context.Context, trace
 	}
 }
 
-func (r *recorder) add(s string) {
-	r.mu.Lock()
-	r.events = append(r.events, s)
-	r.mu.Unlock()
-}
-
 func (r *recorder) snapshot() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
