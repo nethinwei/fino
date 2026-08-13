@@ -111,7 +111,7 @@ DEEPSEEK_API_KEY=sk-... go run .
 七个包，各管一摊：
 
 ```text
-message/  角色、消息、内容块（text / tool_use / tool_result / thinking）
+message/  角色、消息、内容块（text / tool_use / tool_result / thinking / image / audio / video / file）
 tool/     Tool 接口、函数工具 helper、JSON Schema 推断
 model/    Model 接口（Generate + Stream）、流事件类型
 agent/    Agent、Mode（指令 + 工具）、handoff 工具 helper
