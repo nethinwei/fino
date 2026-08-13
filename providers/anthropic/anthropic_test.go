@@ -258,3 +258,74 @@ func TestRunnerToolLoopWithDeepSeekShape(t *testing.T) {
 		t.Fatalf("server calls = %d, want 2", calls)
 	}
 }
+
+func TestUsageNormalization(t *testing.T) {
+	u := usageToMessage(&anthropicUsage{
+		InputTokens:              100,
+		OutputTokens:             50,
+		CacheCreationInputTokens: 20,
+		CacheReadInputTokens:     80,
+	})
+	if u == nil {
+		t.Fatal("usageToMessage returned nil")
+	}
+	if u.InputTokens != 200 || u.OutputTokens != 50 || u.CacheReadTokens != 80 || u.CacheWriteTokens != 20 {
+		t.Fatalf("usage = %+v", u)
+	}
+}
+
+func TestUsageNormalizationNil(t *testing.T) {
+	if u := usageToMessage(nil); u != nil {
+		t.Fatalf("usageToMessage(nil) = %+v, want nil", u)
+	}
+}
+
+func TestGenerateReturnsUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"content":[{"type":"text","text":"hi"}],`+
+			`"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":20,"cache_read_input_tokens":80}}`)
+	}))
+	defer srv.Close()
+
+	m, _ := New("deepseek-v4-flash", WithBaseURL(srv.URL), WithAPIKey("k"))
+	msg, err := m.Generate(context.Background(), []message.Message{message.UserText("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if msg.Usage == nil {
+		t.Fatal("usage was not populated")
+	}
+	if msg.Usage.InputTokens != 200 || msg.Usage.CacheReadTokens != 80 || msg.Usage.CacheWriteTokens != 20 {
+		t.Fatalf("usage = %+v", msg.Usage)
+	}
+}
+
+func TestStreamCapturesUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":80}}}\n\n")
+		io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+		io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":50}}\n\n")
+		io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	m, _ := New("deepseek-v4-flash", WithBaseURL(srv.URL), WithAPIKey("k"))
+	var final *message.Message
+	for ev, err := range m.Stream(context.Background(), []message.Message{message.UserText("hi")}, nil) {
+		if err != nil {
+			t.Fatalf("Stream error: %v", err)
+		}
+		if tm, ok := ev.(model.TurnMessage); ok {
+			msg := tm.Message
+			final = &msg
+		}
+	}
+	if final == nil || final.Usage == nil {
+		t.Fatal("stream did not capture usage")
+	}
+	if final.Usage.InputTokens != 200 || final.Usage.OutputTokens != 50 || final.Usage.CacheReadTokens != 80 || final.Usage.CacheWriteTokens != 20 {
+		t.Fatalf("usage = %+v", final.Usage)
+	}
+}
