@@ -58,6 +58,10 @@ const (
 type Message struct {
 	Role    Role    `json:"role"`
 	Content []Block `json:"content,omitempty"`
+	// Usage holds token accounting for the model response that produced this
+	// message. It is nil for user, system, and tool messages, and for assistant
+	// messages produced without usage information.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // Block is a flat discriminated union of content types. The Type field
